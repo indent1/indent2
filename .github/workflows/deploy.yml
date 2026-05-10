@@ -110,7 +110,7 @@ jobs:
           restore-keys:
             hugo-
 
-      - name: Generate two AI blog posts
+      - name: Generate yidong report
         run: |
           echo "Checking Gemini API key..."
           if [ -z "${GEMINI_API_KEY}" ]; then
@@ -120,43 +120,31 @@ jobs:
 
           echo "Preparing output folders..."
           mkdir -p content/post
-          mkdir -p data
+          mkdir -p stock_cache
 
-          echo "Searching for first stock report Python script..."
-          FIRST_SCRIPT="$(grep -R -l "def get_surge_stocks" . --include="*.py" | grep -v "/www.py$" | head -n 1)"
-
-          if [ -z "${FIRST_SCRIPT}" ]; then
-            echo "No first Python script containing def get_surge_stocks found."
-            echo "Please check your first Python file is committed to this branch."
+          if [ ! -f "yidong.py" ]; then
+            echo "yidong.py not found in repository root."
+            echo "Please check yidong.py is committed to this branch."
             exit 1
           fi
 
-          if [ ! -f "www.py" ]; then
-            echo "www.py not found in repository root."
-            echo "Please check www.py is committed to this branch."
-            exit 1
-          fi
+          echo "Running yidong.py only..."
+          python "yidong.py"
 
-          echo "Running first script: ${FIRST_SCRIPT}"
-          python "${FIRST_SCRIPT}"
+          echo "yidong.py finished."
 
-          echo "Running second script: www.py"
-          python "www.py"
-
-          echo "Both Python scripts finished."
-
-      - name: Commit generated reports and cache
+      - name: Commit generated report and cache
         run: |
           git status --short
 
-          if [ -n "$(git status --porcelain -- content/post data)" ]; then
-            git add content/post data
-            git commit -m "Update AI blog reports and cache [skip ci]"
+          if [ -n "$(git status --porcelain -- content/post stock_cache)" ]; then
+            git add content/post stock_cache
+            git commit -m "Update yidong report and cache [skip ci]"
 
             echo "Pulling latest remote changes before push..."
             git pull --rebase origin "${GITHUB_REF_NAME}"
 
-            echo "Pushing generated reports and cache..."
+            echo "Pushing generated report and cache..."
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
             echo "No report or cache changes to commit."
