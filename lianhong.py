@@ -593,21 +593,17 @@ def ask_gemini_single_stock_brief(stock):
 
 **这波为什么会涨：**
 用3-4条 bullet 分析可能原因，比如题材催化、行业消息、业绩预期、政策方向、市场情绪等。
-如果你不确定，要写“可能与……有关”，不要装作确定。'''
+如果你不确定，要写“可能与……有关”，不要装作确定。"""
 
     user_prompt = f"""请分析这只股票：
-
 股票名称：{stock['name']}
 股票代码：{stock['code']}
-筛选条件：{stock['condition']}
 最近10个交易日区间涨幅：{stock['total_change']:.2f}%
 最新收盘价：{stock['latest_close']:.2f}
 最近10个交易日红K情况：{detail_text}
-
 请重点讲清楚：
 1. 这家公司是做什么的。
 2. 它为什么会连续出现这么多红K，资金可能在炒什么。
-
 """
 
     print(f"🤖 Gemini 正在生成个股解读：{stock['name']}({stock['code']})")
