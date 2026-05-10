@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 LOOKBACK_TRADING_DAYS = 12
 SURGE_THRESHOLD = 7.0
 MIN_SURGE_TIMES = 3
-TOP_N = 30
+TOP_N = 50
 
 # 首次建缓存时才会用到新浪历史接口，别太高
 MAX_WORKERS = 6
@@ -460,7 +460,7 @@ def get_surge_stocks():
 
 
 # ================= Gemini =================
-def ask_gemini(prompt, system_prompt="", temperature=0.4, timeout=180):
+def ask_gemini(prompt, system_prompt="", temperature=0.35, timeout=180):
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
     if not api_key:
@@ -539,56 +539,60 @@ def ask_gemini(prompt, system_prompt="", temperature=0.4, timeout=180):
     return "❌ AI 分析生成失败。"
 
 
-def ask_gemini_to_analyze_for_blog(stock_list):
-    if not stock_list:
-        return "今日全市场未扫描到符合条件的高活跃股票。"
+def ask_gemini_single_stock_brief(stock):
+    """
+    只生成单只股票的通俗解读。
+    不再生成“全市场异动扫描结果”“总体结论”等大段内容。
+    """
+    detail_text = "；".join(stock["surge_days_detail"])
 
-    stocks_str = ""
+    system_prompt = """
+你是一位严谨的A股市场研究员。
+请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
 
-    for s in stock_list:
-        detail_text = "；".join(s["surge_days_detail"])
-        stocks_str += (
-            f"【{s['name']}】(代码: {s['code']})："
-            f"最近{LOOKBACK_TRADING_DAYS}个交易日内出现 {s['times']} 次涨幅超{SURGE_THRESHOLD}%；"
-            f"区间总涨幅: {s['total_change']:.2f}%；"
-            f"最新收盘价: {s['latest_close']:.2f}；"
-            f"异动日期: {detail_text}\n"
-        )
+你必须严格按照下面格式输出：
 
-    system_prompt = f"""
-你是一位严谨的A股量化研究员和市场策略分析师。
+**这家公司是做什么的：**
+用2-4句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
 
-我会给你一个名单，这些股票是从A股全市场机器扫描出来的。
+**这波为什么会涨：**
+用2-4条 bullet 分析可能原因，比如题材催化、资金风格、行业消息、业绩预期、政策方向、市场情绪等。
+如果你不确定，要写“可能与……有关”，不要装作确定。
 
-筛选条件是：
-最近 {LOOKBACK_TRADING_DAYS} 个交易日内，至少出现 {MIN_SURGE_TIMES} 次单日涨幅超过 {SURGE_THRESHOLD}%。
+**需要注意的风险：**
+用2-3条 bullet 写清楚追高、短线资金退潮、基本面不匹配、涨幅过快后的回撤风险。
 
-请生成一篇适合 Hugo 博客发布的 Markdown 正文内容。
-
-严格要求：
-1. 不要写 YAML front matter，程序会自动写。
-2. 不要编造涨跌幅数字。
-3. 不要承诺上涨。
-4. 不要写“买入、推荐、目标价”等投资建议。
-5. 每只股票必须原样复述我给你的股票名称、代码、异动次数、区间涨幅和异动日期。
-6. 最后必须有风险提示。
-
-文章结构：
-## 一、全市场异动扫描结果
-## 二、TOP活跃股票逐只拆解
-## 三、总体结论
-## 四、风险声明
+要求：
+- 不要编造涨跌幅数字。
+- 不要写“建议买入”“目标价”“还能涨”等投资建议。
+- 不要输出标题“以下是……”
+- 不要输出全市场总结。
+- 只围绕这一只股票解释。
 """
 
-    user_message = f"请基于以下真实扫描结果生成博客正文：\n\n{stocks_str}"
+    user_prompt = f"""
+请分析这只股票：
 
-    print("🤖 Gemini 正在生成博客正文...")
+股票名称：{stock['name']}
+股票代码：{stock['code']}
+筛选条件：最近{LOOKBACK_TRADING_DAYS}个交易日内出现 {stock['times']} 次单日涨幅超过 {SURGE_THRESHOLD}%
+区间总涨幅：{stock['total_change']:.2f}%
+最新收盘价：{stock['latest_close']:.2f}
+异动日期：{detail_text}
+
+请重点讲清楚：
+1. 这家公司是做什么的。
+2. 它这波上涨可能是什么原因。
+3. 有什么风险。
+"""
+
+    print(f"🤖 Gemini 正在生成个股解读：{stock['name']}({stock['code']})")
 
     return ask_gemini(
-        prompt=user_message,
+        prompt=user_prompt,
         system_prompt=system_prompt,
-        temperature=0.4,
-        timeout=180
+        temperature=0.35,
+        timeout=120
     )
 
 
@@ -681,24 +685,25 @@ draft: false
             )
 
         md_content += "\n---\n\n"
-
-        md_content += "## 个股行情走势图\n\n"
+        md_content += "## 个股行情与通俗解读\n\n"
 
         for idx, s in enumerate(stock_list, start=1):
             md_content += f"### {idx}. {s['name']}（{s['code']}）\n\n"
+
             md_content += (
                 f"**异动数据**：最近 {LOOKBACK_TRADING_DAYS} 个交易日内，"
                 f"出现 **{s['times']}** 次单日涨幅大于 **{SURGE_THRESHOLD}%**；"
                 f"区间总涨幅 **{s['total_change']:.2f}%**；"
                 f"最新收盘价 **{s['latest_close']:.2f}**。\n\n"
             )
+
             md_content += get_sina_chart_html(s["symbol"], s["name"])
+
+            stock_brief = ask_gemini_single_stock_brief(s)
+            md_content += stock_brief + "\n\n"
+
             md_content += "---\n\n"
 
-        ai_analysis = ask_gemini_to_analyze_for_blog(stock_list)
-        md_content += ai_analysis + "\n\n"
-
-        md_content += "---\n\n"
         md_content += get_random_philosophy() + "\n\n"
 
     md_content += f"""
