@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 LOOKBACK_TRADING_DAYS = 12
 SURGE_THRESHOLD = 7.0
 MIN_SURGE_TIMES = 3
-TOP_N = 50
+TOP_N = 30
 
 # 首次建缓存时才会用到新浪历史接口，别太高
 MAX_WORKERS = 6
@@ -23,14 +23,20 @@ MAX_WORKERS = 6
 HIST_CALENDAR_DAYS = 60
 
 POST_FOLDER = "content/post"
-DATA_FOLDER = "data"
-CACHE_FILE = os.path.join(DATA_FOLDER, "sina_close_cache.csv")
+
+# 缓存目录：会生成 stock_cache/sina_close_cache.csv
+CACHE_FOLDER = "stock_cache"
+CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_close_cache.csv")
 
 REPORT_PREFIX = "radar"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 # ================= 工具函数 =================
+def cn_now():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+
 def get_market_prefix(code):
     code_str = str(code)
     code_str = (
@@ -52,9 +58,36 @@ def get_market_prefix(code):
     return f"sh{code_str}"
 
 
+def get_sina_chart_html(symbol, stock_name):
+    """
+    生成新浪分时图 + 日K图 HTML。
+    symbol 示例：sh600000 / sz300905 / bj430017
+    """
+    market_code = get_market_prefix(symbol)
+
+    min_chart_url = f"https://image.sinajs.cn/newchart/min/n/{market_code}.gif"
+    daily_chart_url = f"https://image.sinajs.cn/newchart/daily/n/{market_code}.gif"
+
+    return f"""
+**📊 行情走势图（左：今日分时，右：近期日K）：**
+
+<div style="display: flex; justify-content: space-between; gap: 20px; margin: 18px 0 28px 0; flex-wrap: wrap;">
+  <div style="flex: 1; min-width: 280px; text-align: center;">
+    <img src="{min_chart_url}" alt="{stock_name} 分时图" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+    <div style="font-size: 14px; color: #666; margin-top: 6px;">今日分时图</div>
+  </div>
+  <div style="flex: 1; min-width: 280px; text-align: center;">
+    <img src="{daily_chart_url}" alt="{stock_name} 日K线图" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+    <div style="font-size: 14px; color: #666; margin-top: 6px;">近期日K线</div>
+  </div>
+</div>
+
+"""
+
+
 def get_date_range():
-    end_date = datetime.datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=HIST_CALENDAR_DAYS)).strftime("%Y%m%d")
+    end_date = cn_now().strftime("%Y%m%d")
+    start_date = (cn_now() - datetime.timedelta(days=HIST_CALENDAR_DAYS)).strftime("%Y%m%d")
     return start_date, end_date
 
 
@@ -62,7 +95,23 @@ def normalize_date(value):
     try:
         return pd.to_datetime(value).strftime("%Y-%m-%d")
     except Exception:
-        return datetime.datetime.now().strftime("%Y-%m-%d")
+        return cn_now().strftime("%Y-%m-%d")
+
+
+def get_safe_market_date():
+    """
+    如果新浪实时行情没有给交易日期，就用北京时间日期。
+    周末则回退到上一个周五，避免生成周末假K线。
+    """
+    now = cn_now()
+    weekday = now.weekday()
+
+    if weekday == 5:
+        now = now - datetime.timedelta(days=1)
+    elif weekday == 6:
+        now = now - datetime.timedelta(days=2)
+
+    return now.strftime("%Y-%m-%d")
 
 
 def get_random_philosophy():
@@ -135,17 +184,15 @@ def get_all_a_stock_spot_sina():
         spot_df["name"] = spot_df[name_col]
         spot_df["close"] = pd.to_numeric(spot_df[price_col], errors="coerce")
 
-        # 剔除 ST、退市、无价格、停牌
         spot_df = spot_df[~spot_df["name"].str.contains("ST|退", regex=True, na=False)].copy()
         spot_df = spot_df[spot_df["close"] > 0].copy()
 
-        # 优先使用新浪返回的交易日期；没有就用当天日期
         date_cols = [col for col in spot_df.columns if "日期" in col or "date" in col.lower()]
         if date_cols:
             date_col = date_cols[0]
             spot_df["date"] = spot_df[date_col].apply(normalize_date)
         else:
-            spot_df["date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+            spot_df["date"] = get_safe_market_date()
 
         result = spot_df[["symbol", "code", "name", "date", "close"]].dropna().copy()
         result = result.drop_duplicates(subset=["symbol"], keep="last")
@@ -172,20 +219,20 @@ def load_cache():
         cache_df = cache_df.dropna(subset=["symbol", "date", "close"])
         print(f"🧊 已加载历史缓存：{len(cache_df)} 行。")
         return cache_df
+
     except Exception as e:
         print(f"⚠️ 历史缓存读取失败，将重建缓存：{str(e)}")
         return pd.DataFrame(columns=["symbol", "code", "name", "date", "close"])
 
 
 def save_cache(cache_df):
-    os.makedirs(DATA_FOLDER, exist_ok=True)
+    os.makedirs(CACHE_FOLDER, exist_ok=True)
 
     cache_df = cache_df.dropna(subset=["symbol", "date", "close"]).copy()
     cache_df["date"] = cache_df["date"].astype(str)
     cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
     cache_df = cache_df.dropna(subset=["close"])
 
-    # 只保留最近80个交易记录，避免缓存无限变大
     cache_df = cache_df.sort_values(["symbol", "date"])
     cache_df = cache_df.groupby("symbol", group_keys=False).tail(80)
 
@@ -202,7 +249,6 @@ def cache_too_old(cache_df, spot_trade_date):
         spot_date = pd.to_datetime(spot_trade_date)
         gap_days = (spot_date - latest_cache_date).days
 
-        # 周末间隔一般不超过3天；超过6天说明中间缺了不少交易日，建议重建
         return gap_days > 6
 
     except Exception:
@@ -291,11 +337,6 @@ def rebuild_history_cache_from_sina(spot_df):
 
 
 def update_cache_with_spot(cache_df, spot_df):
-    """
-    用新浪实时全市场行情更新当天收盘价。
-    如果你在15:35以后运行，基本可视为当天收盘价。
-    """
-
     if spot_df is None or spot_df.empty:
         return cache_df
 
@@ -338,7 +379,6 @@ def screen_from_cache(cache_df):
     for symbol, group in cache_df.groupby("symbol"):
         group = group.drop_duplicates(subset=["date"], keep="last").sort_values("date")
 
-        # 12个涨幅需要13个收盘价
         if len(group) < LOOKBACK_TRADING_DAYS + 1:
             continue
 
@@ -399,7 +439,6 @@ def screen_from_cache(cache_df):
     return top_results
 
 
-# 这个函数名保留，方便 GitHub Actions 自动识别
 def get_surge_stocks():
     spot_df = get_all_a_stock_spot_sina()
 
@@ -410,12 +449,10 @@ def get_surge_stocks():
 
     spot_trade_date = str(spot_df["date"].iloc[0])
 
-    # 首次运行或缓存太旧时，才全量请求历史K线
     if cache_too_old(cache_df, spot_trade_date):
         print("⚠️ 缓存为空或过旧，将全量重建。首次运行会比较慢。")
         cache_df = rebuild_history_cache_from_sina(spot_df)
 
-    # 每次运行都用新浪实时行情更新当天价格
     cache_df = update_cache_with_spot(cache_df, spot_df)
     save_cache(cache_df)
 
@@ -557,12 +594,11 @@ def ask_gemini_to_analyze_for_blog(stock_list):
 
 # ================= 写 Hugo 博客 =================
 def write_blog_post(stock_list):
-    today_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    post_time = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    today_date = cn_now().strftime("%Y-%m-%d")
+    post_time = cn_now().strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
     os.makedirs(POST_FOLDER, exist_ok=True)
 
-    # 只删除本脚本生成的旧文章，不影响 www.py 或其他脚本
     for old_file in glob.glob(os.path.join(POST_FOLDER, f"{REPORT_PREFIX}-*.md")):
         os.remove(old_file)
 
@@ -645,6 +681,19 @@ draft: false
             )
 
         md_content += "\n---\n\n"
+
+        md_content += "## 个股行情走势图\n\n"
+
+        for idx, s in enumerate(stock_list, start=1):
+            md_content += f"### {idx}. {s['name']}（{s['code']}）\n\n"
+            md_content += (
+                f"**异动数据**：最近 {LOOKBACK_TRADING_DAYS} 个交易日内，"
+                f"出现 **{s['times']}** 次单日涨幅大于 **{SURGE_THRESHOLD}%**；"
+                f"区间总涨幅 **{s['total_change']:.2f}%**；"
+                f"最新收盘价 **{s['latest_close']:.2f}**。\n\n"
+            )
+            md_content += get_sina_chart_html(s["symbol"], s["name"])
+            md_content += "---\n\n"
 
         ai_analysis = ask_gemini_to_analyze_for_blog(stock_list)
         md_content += ai_analysis + "\n\n"
