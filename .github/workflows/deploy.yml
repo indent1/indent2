@@ -110,7 +110,7 @@ jobs:
           restore-keys:
             hugo-
 
-      - name: Generate AI stock report
+      - name: Generate two AI blog posts
         run: |
           echo "Checking Gemini API key..."
           if [ -z "${GEMINI_API_KEY}" ]; then
@@ -118,26 +118,42 @@ jobs:
             exit 1
           fi
 
-          echo "Searching for stock report Python script..."
-          SCRIPT_FILE="$(grep -R -l "def get_surge_stocks" . --include="*.py" | head -n 1)"
+          echo "Searching for first stock report Python script..."
+          FIRST_SCRIPT="$(grep -R -l "def get_surge_stocks" . --include="*.py" | grep -v "/www.py$" | head -n 1)"
 
-          if [ -z "${SCRIPT_FILE}" ]; then
-            echo "No Python script containing def get_surge_stocks found."
-            echo "Please check your Python file is committed to this branch."
+          if [ -z "${FIRST_SCRIPT}" ]; then
+            echo "No first Python script containing def get_surge_stocks found."
+            echo "Please check your first Python file is committed to this branch."
             exit 1
           fi
 
-          echo "Running script: ${SCRIPT_FILE}"
-          python "${SCRIPT_FILE}"
+          if [ ! -f "www.py" ]; then
+            echo "www.py not found in repository root."
+            echo "Please check www.py is committed to this branch."
+            exit 1
+          fi
 
-      - name: Commit generated report
+          echo "Running first script: ${FIRST_SCRIPT}"
+          python "${FIRST_SCRIPT}"
+
+          echo "Running second script: www.py"
+          python "www.py"
+
+          echo "Both Python scripts finished."
+
+      - name: Commit generated reports
         run: |
           git status --short
 
           if [ -n "$(git status --porcelain content/post)" ]; then
             git add content/post
-            git commit -m "Update AI stock report [skip ci]"
-            git push
+            git commit -m "Update AI blog reports [skip ci]"
+
+            echo "Pulling latest remote changes before push..."
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+
+            echo "Pushing generated reports..."
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           else
             echo "No report changes to commit."
           fi
