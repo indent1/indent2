@@ -17,7 +17,7 @@ RED_DAYS_LONG = 8
 RED_WINDOW_SHORT = 7
 RED_DAYS_SHORT = 6
 
-TOP_N = 30
+TOP_N = 25
 
 # 首次建缓存时才会用到新浪历史接口，别太高
 MAX_WORKERS = 6
@@ -584,22 +584,18 @@ def ask_gemini(prompt, system_prompt="", temperature=0.35, timeout=180):
 def ask_gemini_single_stock_brief(stock):
     detail_text = "；".join(stock["red_days_detail"])
 
-    system_prompt = """
-你是一位严谨的A股市场研究员。
+    system_prompt = """你是一位严谨的A股市场研究员。
 请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
-
 你必须严格按照下面格式输出：
 
 **这家公司是做什么的：**
-用2-4句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
+用3-4句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
 
 **这波为什么会涨：**
-用2-4条 bullet 分析可能原因，比如题材催化、行业消息、业绩预期、政策方向、市场情绪等。
-如果你不确定，要写“可能与……有关”，不要装作确定。
+用3-4条 bullet 分析可能原因，比如题材催化、行业消息、业绩预期、政策方向、市场情绪等。
+如果你不确定，要写“可能与……有关”，不要装作确定。'''
 
-
-    user_prompt = f"""
-请分析这只股票：
+    user_prompt = f"""请分析这只股票：
 
 股票名称：{stock['name']}
 股票代码：{stock['code']}
