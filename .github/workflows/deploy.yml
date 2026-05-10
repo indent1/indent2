@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -98,6 +98,8 @@ jobs:
       - name: Configure Git
         run: |
           git config core.quotepath false
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Cache restore
         id: cache-restore
@@ -127,6 +129,18 @@ jobs:
 
           echo "Running script: ${SCRIPT_FILE}"
           python "${SCRIPT_FILE}"
+
+      - name: Commit generated report
+        run: |
+          git status --short
+
+          if [ -n "$(git status --porcelain content/post)" ]; then
+            git add content/post
+            git commit -m "Update AI stock report [skip ci]"
+            git push
+          else
+            echo "No report changes to commit."
+          fi
 
       - name: Build the site
         run: |
