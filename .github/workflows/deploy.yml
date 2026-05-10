@@ -1,73 +1,104 @@
 name: Build and deploy
+
 on:
   push:
     branches:
       - main
       - master
+      - Indent2
   workflow_dispatch:
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
 concurrency:
   group: pages
   cancel-in-progress: false
+
 defaults:
   run:
     shell: bash
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
       DART_SASS_VERSION: 1.97.1
       GO_VERSION: 1.25.5
-      HUGO_VERSION: 0.154.2
+      HUGO_VERSION: 0.161.1
       NODE_VERSION: 24.12.0
-      TZ: Europe/Oslo
+      TZ: Asia/Shanghai
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: gemini-2.5-flash
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 0
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
+
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v6
+
       - name: Create directory for user-specific executable files
         run: |
           mkdir -p "${HOME}/.local"
+
       - name: Install Dart Sass
         run: |
           curl -sLJO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
           tar -C "${HOME}/.local" -xf "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
           rm "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
           echo "${HOME}/.local/dart-sass" >> "${GITHUB_PATH}"
+
       - name: Setup Hugo
         uses: peaceiris/actions-hugo@v3
         with:
-          hugo-version: 'latest'
+          hugo-version: ${{ env.HUGO_VERSION }}
           extended: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Verify installations
         run: |
           echo "Dart Sass: $(sass --version)"
           echo "Go: $(go version)"
           echo "Hugo: $(hugo version)"
           echo "Node.js: $(node --version)"
+          echo "Python: $(python --version)"
+
       - name: Install Node.js dependencies
         run: |
           [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas akshare
+
       - name: Configure Git
         run: |
           git config core.quotepath false
+
       - name: Cache restore
         id: cache-restore
         uses: actions/cache/restore@v5
@@ -76,6 +107,27 @@ jobs:
           key: hugo-${{ github.run_id }}
           restore-keys:
             hugo-
+
+      - name: Generate AI stock report
+        run: |
+          echo "Checking Gemini API key..."
+          if [ -z "${GEMINI_API_KEY}" ]; then
+            echo "GEMINI_API_KEY is empty. Please check GitHub repository secret."
+            exit 1
+          fi
+
+          echo "Searching for stock report Python script..."
+          SCRIPT_FILE="$(grep -R -l "def get_surge_stocks" . --include="*.py" | head -n 1)"
+
+          if [ -z "${SCRIPT_FILE}" ]; then
+            echo "No Python script containing def get_surge_stocks found."
+            echo "Please check your Python file is committed to this branch."
+            exit 1
+          fi
+
+          echo "Running script: ${SCRIPT_FILE}"
+          python "${SCRIPT_FILE}"
+
       - name: Build the site
         run: |
           hugo \
@@ -83,22 +135,27 @@ jobs:
             --minify \
             --baseURL "${{ steps.pages.outputs.base_url }}/" \
             --cacheDir "${{ runner.temp }}/hugo_cache"
+
       - name: Cache save
         id: cache-save
         uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/hugo_cache
           key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
           path: ./public
+
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     runs-on: ubuntu-latest
     needs: build
+
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
