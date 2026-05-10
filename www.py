@@ -564,7 +564,7 @@ draft: false
 *本文由自动化程序于北京时间 {today_date} 自动发布。*
 """
 
-    file_path = os.path.join(POST_FOLDER, f"report-{today_date}.md")
+    file_path = os.path.join(POST_FOLDER, f"12天异动3次-{today_date}.md")
 
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(md_content)
