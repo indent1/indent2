@@ -231,7 +231,7 @@ def ask_gemini(prompt, system_prompt="", temperature=0.5, timeout=60):
 def ask_gemini_single(stock_name):
     system_prompt = """
 你是一位严谨的A股量化研究员。
-请分析这只股票，必须严格按照以下三段格式输出（绝对不准写总标题，绝对不准捏造任何涨跌幅数字）：
+请分析这只股票，先通俗易懂的讲讲这个公司是做啥的，以及：
 
 【🏰 核心产业壁垒】：(一段话，写它的主营业务、护城河和行业地位)
 
