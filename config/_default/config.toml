@@ -1,5 +1,5 @@
 # Change baseurl before deploy
-baseurl = "https://indent1.github.io/"
+baseurl = "https://indent1.github.io/indent2/"
 locale  = "zh-cn"
 title   = "indent1的地盘"
 
