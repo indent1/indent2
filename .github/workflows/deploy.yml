@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -137,18 +137,47 @@ jobs:
         run: |
           git status --short
 
+          if [ -z "$(git status --porcelain -- content/post stock_cache)" ]; then
+            echo "No report or cache changes to commit."
+            exit 0
+          fi
+
+          echo "Saving generated radar report and cache..."
+          rm -rf /tmp/yidong_generated
+          mkdir -p /tmp/yidong_generated/post
+          mkdir -p /tmp/yidong_generated/stock_cache
+
+          shopt -s nullglob
+
+          cp content/post/radar-*.md /tmp/yidong_generated/post/ 2>/dev/null || true
+
+          if [ -d "stock_cache" ]; then
+            cp -a stock_cache/. /tmp/yidong_generated/stock_cache/ 2>/dev/null || true
+          fi
+
+          echo "Syncing latest remote branch..."
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+
+          echo "Restoring generated radar report and cache..."
+          mkdir -p content/post
+          mkdir -p stock_cache
+
+          rm -f content/post/radar-*.md
+
+          cp /tmp/yidong_generated/post/*.md content/post/ 2>/dev/null || true
+          cp -a /tmp/yidong_generated/stock_cache/. stock_cache/ 2>/dev/null || true
+
+          git status --short
+
           if [ -n "$(git status --porcelain -- content/post stock_cache)" ]; then
             git add content/post stock_cache
             git commit -m "Update yidong report and cache [skip ci]"
-
-            echo "Pulling latest remote changes before push..."
-            git pull --rebase origin "${GITHUB_REF_NAME}"
-
-            echo "Pushing generated report and cache..."
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
-            echo "No report or cache changes to commit."
+            echo "No report or cache changes after sync."
           fi
+
 
       - name: Build the site
         run: |
