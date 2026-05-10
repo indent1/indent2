@@ -122,16 +122,16 @@ jobs:
           mkdir -p content/post
           mkdir -p stock_cache
 
-          if [ ! -f "yidong.py" ]; then
-            echo "yidong.py not found in repository root."
-            echo "Please check yidong.py is committed to this branch."
+          if [ ! -f "lianhong.py" ]; then
+            echo "lianhong.py not found in repository root."
+            echo "Please check lianhong.py is committed to this branch."
             exit 1
           fi
 
-          echo "Running yidong.py only..."
-          python "yidong.py"
+          echo "Running lianhong.py only..."
+          python "lianhong.py"
 
-          echo "yidong.py finished."
+          echo "lianhong.py finished."
 
       - name: Commit generated report and cache
         run: |
