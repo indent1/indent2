@@ -118,6 +118,10 @@ jobs:
             exit 1
           fi
 
+          echo "Preparing output folders..."
+          mkdir -p content/post
+          mkdir -p data
+
           echo "Searching for first stock report Python script..."
           FIRST_SCRIPT="$(grep -R -l "def get_surge_stocks" . --include="*.py" | grep -v "/www.py$" | head -n 1)"
 
@@ -141,21 +145,21 @@ jobs:
 
           echo "Both Python scripts finished."
 
-      - name: Commit generated reports
+      - name: Commit generated reports and cache
         run: |
           git status --short
 
-          if [ -n "$(git status --porcelain content/post)" ]; then
-            git add content/post
-            git commit -m "Update AI blog reports [skip ci]"
+          if [ -n "$(git status --porcelain -- content/post data)" ]; then
+            git add content/post data
+            git commit -m "Update AI blog reports and cache [skip ci]"
 
             echo "Pulling latest remote changes before push..."
             git pull --rebase origin "${GITHUB_REF_NAME}"
 
-            echo "Pushing generated reports..."
+            echo "Pushing generated reports and cache..."
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
-            echo "No report changes to commit."
+            echo "No report or cache changes to commit."
           fi
 
       - name: Build the site
