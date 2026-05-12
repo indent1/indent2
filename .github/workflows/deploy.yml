@@ -136,7 +136,7 @@ jobs:
           hugo \
             --gc \
             --minify \
-            --baseURL "https://${{ github.repository_owner }}.github.io/"
+            --baseURL "https://indent1.github.io/indent2/"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
