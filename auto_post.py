@@ -145,7 +145,7 @@ def ask_gemini(prompt, system_prompt="", temperature=0.5, timeout=60):
         return "❌ Gemini API Key 未配置。请在部署平台环境变量中添加 GEMINI_API_KEY。"
 
     # 默认使用 Gemini 2.5 Flash。以后想换模型，只需要在环境变量里加 GEMINI_MODEL。
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
