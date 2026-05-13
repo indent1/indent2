@@ -26,7 +26,7 @@ HIST_CALENDAR_DAYS = 45
 POST_FOLDER = "content/post"
 
 # Gemini模型
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
 
 # ================= 工具函数：获取日期区间 =================
@@ -454,7 +454,7 @@ def ask_gemini_to_analyze_for_blog(stock_list):
     return ask_gemini(
         prompt=user_message,
         system_prompt=system_prompt,
-        temperature=0.4,
+        temperature=0.6,
         timeout=180
     )
 
