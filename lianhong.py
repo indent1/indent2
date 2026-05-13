@@ -32,7 +32,7 @@ CACHE_FOLDER = "stock_cache"
 CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_ohlc_cache.csv")
 
 REPORT_PREFIX = "redk"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
 
 # ================= 工具函数 =================
@@ -502,7 +502,7 @@ def get_surge_stocks():
 
 
 # ================= Gemini =================
-def ask_gemini(prompt, system_prompt="", temperature=0.35, timeout=180):
+def ask_gemini(prompt, system_prompt="", temperature=0.65, timeout=180):
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
     if not api_key:
