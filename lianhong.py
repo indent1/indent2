@@ -603,7 +603,7 @@ def ask_gemini_single_stock_brief(stock):
 最近10个交易日红K情况：{detail_text}
 请重点讲清楚：
 1. 这家公司是做什么的。
-2. 它为什么会连续出现这么多红K，资金可能在炒什么。
+2. 它为什么会连续出现这么多红K，资金可能在炒什么。两者加起来150字左右。
 """
 
     print(f"🤖 Gemini 正在生成个股解读：{stock['name']}({stock['code']})")
@@ -611,7 +611,7 @@ def ask_gemini_single_stock_brief(stock):
     return ask_gemini(
         prompt=user_prompt,
         system_prompt=system_prompt,
-        temperature=0.35,
+        temperature=0.65,
         timeout=120
     )
 
