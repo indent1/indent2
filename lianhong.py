@@ -32,7 +32,8 @@ CACHE_FOLDER = "stock_cache"
 CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_ohlc_cache.csv")
 
 REPORT_PREFIX = "redk"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 
 
 # ================= 工具函数 =================
@@ -502,42 +503,47 @@ def get_surge_stocks():
 
 
 # ================= Gemini =================
-def ask_gemini(prompt, system_prompt="", temperature=0.65, timeout=180):
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+# ================= DeepSeek =================
+def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
 
     if not api_key:
-        return "❌ Gemini API Key 未配置。请在 GitHub Secrets 中添加 GEMINI_API_KEY。"
+        return "❌ DeepSeek API Key 未配置。请在 GitHub Secrets 中添加 DEEPSEEK_API_KEY。"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    url = f"{DEEPSEEK_API_BASE.rstrip('/')}/chat/completions"
 
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": api_key
+        "Authorization": f"Bearer {api_key}"
     }
 
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": temperature
-        }
-    }
+    messages = []
 
     if system_prompt:
-        payload["systemInstruction"] = {
-            "parts": [
-                {
-                    "text": system_prompt
-                }
-            ]
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False
+    }
+
+    # DeepSeek V4 支持 thinking 开关。这里默认关闭，适合生成博客短文，省 token 也更快。
+    # 如果你想开启思考模式，可以在 GitHub Secrets 里设置：
+    # DEEPSEEK_THINKING=enabled
+    thinking_mode = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
+    if thinking_mode in ["enabled", "disabled"]:
+        payload["thinking"] = {
+            "type": thinking_mode
         }
 
     for i in range(3):
@@ -545,43 +551,38 @@ def ask_gemini(prompt, system_prompt="", temperature=0.65, timeout=180):
             response = requests.post(url, headers=headers, json=payload, timeout=timeout)
 
             if response.status_code != 200:
-                print(f"❌ Gemini HTTP错误：{response.status_code}")
+                print(f"❌ DeepSeek HTTP错误：{response.status_code}")
                 print(response.text)
                 time.sleep(2)
                 continue
 
             data = response.json()
-            candidates = data.get("candidates", [])
+            choices = data.get("choices", [])
 
-            if not candidates:
-                print("❌ Gemini 没有返回 candidates。")
+            if not choices:
+                print("❌ DeepSeek 没有返回 choices。")
                 print(data)
                 time.sleep(2)
                 continue
 
-            parts = candidates[0].get("content", {}).get("parts", [])
-
-            if not parts:
-                print("❌ Gemini 没有返回正文 parts。")
-                print(data)
-                time.sleep(2)
-                continue
-
-            text = parts[0].get("text", "").strip()
+            message = choices[0].get("message", {})
+            text = message.get("content", "").strip()
 
             if text:
                 return text
 
+            print("❌ DeepSeek 返回正文为空。")
+            print(data)
             time.sleep(2)
 
         except Exception as e:
-            print(f"❌ Gemini 请求失败，第 {i + 1} 次：{str(e)}")
+            print(f"❌ DeepSeek 请求失败，第 {i + 1} 次：{str(e)}")
             time.sleep(2)
 
     return "❌ AI 分析生成失败。"
 
 
-def ask_gemini_single_stock_brief(stock):
+def ask_deepseek_single_stock_brief(stock):
     detail_text = "；".join(stock["red_days_detail"])
 
     system_prompt = """你是一位严谨的A股市场研究员。
@@ -606,15 +607,49 @@ def ask_gemini_single_stock_brief(stock):
 2. 它为什么会连续出现这么多红K，资金可能在炒什么。两者加起来150字左右。
 """
 
-    print(f"🤖 Gemini 正在生成个股解读：{stock['name']}({stock['code']})")
+    print(f"🤖 DeepSeek 正在生成个股解读：{stock['name']}({stock['code']})")
 
-    return ask_gemini(
+    return ask_deepseek(
         prompt=user_prompt,
         system_prompt=system_prompt,
         temperature=0.65,
         timeout=120
     )
 
+
+def ask_deepseek_single_stock_brief(stock):
+    detail_text = "；".join(stock["red_days_detail"])
+
+    system_prompt = """你是一位严谨的A股市场研究员。
+请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
+你必须严格按照下面格式输出：
+
+**这家公司是做什么的：**
+用1-2句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
+
+**这波为什么会涨：**
+用1-2条 bullet 分析可能原因，比如题材催化、业绩预期、政策方向等。
+"""
+
+    user_prompt = f"""请分析这只股票：
+股票名称：{stock['name']}
+股票代码：{stock['code']}
+最近10个交易日区间涨幅：{stock['total_change']:.2f}%
+最新收盘价：{stock['latest_close']:.2f}
+最近10个交易日红K情况：{detail_text}
+请重点讲清楚：
+1. 这家公司是做什么的。
+2. 它为什么会连续出现这么多红K，资金可能在炒什么。两者加起来150字左右。
+"""
+
+    print(f"🤖 DeepSeek 正在生成个股解读：{stock['name']}({stock['code']})")
+
+    return ask_deepseek(
+        prompt=user_prompt,
+        system_prompt=system_prompt,
+        temperature=0.65,
+        timeout=120
+    )
 
 # ================= 写 Hugo 博客 =================
 def write_blog_post(stock_list):
@@ -726,7 +761,8 @@ draft: false
 
             md_content += get_sina_chart_html(s["symbol"], s["name"])
 
-            stock_brief = ask_gemini_single_stock_brief(s)
+            stock_brief = ask_deepseek_single_stock_brief(s)
+
             md_content += stock_brief + "\n\n"
 
             md_content += "---\n\n"
