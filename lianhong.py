@@ -22,8 +22,8 @@ TOP_N = 25
 # 首次建缓存时才会用到新浪历史接口，别太高
 MAX_WORKERS = 6
 
-# 拉最近60个自然日，保证覆盖10个交易日
-HIST_CALENDAR_DAYS = 20
+# 拉最近60个自然日，尽量覆盖10个交易日以及节假日空档
+HIST_CALENDAR_DAYS = 60
 
 POST_FOLDER = "content/post"
 
@@ -32,8 +32,11 @@ CACHE_FOLDER = "stock_cache"
 CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_ohlc_cache.csv")
 
 REPORT_PREFIX = "redk"
+
+# DeepSeek 配置
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
 
 
 # ================= 工具函数 =================
@@ -138,14 +141,18 @@ def get_random_philosophy():
 
 
 def find_column(columns, keywords):
+    str_columns = [str(col) for col in columns]
+
     for keyword in keywords:
-        for col in columns:
+        for col in str_columns:
             if keyword in col:
                 return col
+
     for keyword in keywords:
-        for col in columns:
+        for col in str_columns:
             if keyword.lower() in col.lower():
                 return col
+
     return None
 
 
@@ -204,7 +211,12 @@ def get_all_a_stock_spot_sina():
         else:
             spot_df["date"] = get_safe_market_date()
 
-        result = spot_df[["symbol", "code", "name", "date", "open", "close"]].dropna(subset=["symbol", "code", "name", "date", "close"]).copy()
+        result = (
+            spot_df[["symbol", "code", "name", "date", "open", "close"]]
+            .dropna(subset=["symbol", "code", "name", "date", "close"])
+            .copy()
+        )
+
         result = result.drop_duplicates(subset=["symbol"], keep="last")
 
         print(f"🚀 新浪返回可用股票数量：{len(result)}")
@@ -217,10 +229,14 @@ def get_all_a_stock_spot_sina():
 
 
 # ================= 缓存读写 =================
+def empty_cache_df():
+    return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
+
+
 def load_cache():
     if not os.path.exists(CACHE_FILE):
         print("🧊 未发现历史缓存，准备首次全量建立缓存。")
-        return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
+        return empty_cache_df()
 
     try:
         cache_df = pd.read_csv(CACHE_FILE, dtype={"symbol": str, "code": str})
@@ -229,7 +245,7 @@ def load_cache():
         for col in required_cols:
             if col not in cache_df.columns:
                 print(f"⚠️ 缓存缺少字段 {col}，需要重建缓存。")
-                return pd.DataFrame(columns=required_cols)
+                return empty_cache_df()
 
         cache_df["date"] = cache_df["date"].astype(str)
         cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
@@ -241,17 +257,25 @@ def load_cache():
 
     except Exception as e:
         print(f"⚠️ 历史缓存读取失败，将重建缓存：{str(e)}")
-        return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
+        return empty_cache_df()
 
 
 def save_cache(cache_df):
     os.makedirs(CACHE_FOLDER, exist_ok=True)
+
+    if cache_df is None or cache_df.empty:
+        print("⚠️ 缓存为空，本次不写入缓存文件。")
+        return
 
     cache_df = cache_df.dropna(subset=["symbol", "date", "open", "close"]).copy()
     cache_df["date"] = cache_df["date"].astype(str)
     cache_df["open"] = pd.to_numeric(cache_df["open"], errors="coerce")
     cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
     cache_df = cache_df.dropna(subset=["open", "close"])
+
+    if cache_df.empty:
+        print("⚠️ 清洗后缓存为空，本次不写入缓存文件。")
+        return
 
     cache_df = cache_df.sort_values(["symbol", "date"])
     cache_df = cache_df.groupby("symbol", group_keys=False).tail(80)
@@ -261,7 +285,7 @@ def save_cache(cache_df):
 
 
 def cache_too_old(cache_df, spot_trade_date):
-    if cache_df.empty:
+    if cache_df is None or cache_df.empty:
         return True
 
     if "open" not in cache_df.columns or "close" not in cache_df.columns:
@@ -312,7 +336,7 @@ def fetch_one_history_sina(row, start_date, end_date):
         for _, h in hist_df.iterrows():
             rows.append({
                 "symbol": row["symbol"],
-                "code": row["code"],
+                "code": str(row["code"]).zfill(6),
                 "name": row["name"],
                 "date": h["date"],
                 "open": float(h["open"]),
@@ -355,7 +379,8 @@ def rebuild_history_cache_from_sina(spot_df):
                 rows.extend(result_rows)
 
     if not rows:
-        return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
+        print("⚠️ OHLC历史缓存重建失败，未获取到历史K线。")
+        return empty_cache_df()
 
     cache_df = pd.DataFrame(rows)
     cache_df = cache_df.drop_duplicates(subset=["symbol", "date"], keep="last")
@@ -378,10 +403,11 @@ def update_cache_with_spot(cache_df, spot_df):
         print("⚠️ 新浪实时行情没有可用open字段，本次不更新当天K线。")
         return cache_df
 
-    if cache_df.empty:
+    if cache_df is None or cache_df.empty:
         updated = spot_rows.copy()
     else:
         cache_df = cache_df.copy()
+
         cache_df["key"] = cache_df["symbol"].astype(str) + "_" + cache_df["date"].astype(str)
         spot_rows["key"] = spot_rows["symbol"].astype(str) + "_" + spot_rows["date"].astype(str)
 
@@ -402,6 +428,10 @@ def screen_from_cache(cache_df):
     print("🧮 正在从本地缓存中执行红K量化筛选...")
 
     results = []
+
+    if cache_df is None or cache_df.empty:
+        print("今日未筛选到符合红K条件的股票。")
+        return None
 
     cache_df = cache_df.copy()
     cache_df["date"] = cache_df["date"].astype(str)
@@ -433,7 +463,6 @@ def screen_from_cache(cache_df):
         if not condition_list:
             continue
 
-        # 最近10个交易日区间涨幅，用于排序
         close_latest = float(last_10.iloc[-1]["close"])
         close_start = float(last_10.iloc[0]["close"])
 
@@ -502,7 +531,6 @@ def get_surge_stocks():
     return screen_from_cache(cache_df)
 
 
-# ================= Gemini =================
 # ================= DeepSeek =================
 def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
     api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -537,13 +565,12 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
         "stream": False
     }
 
-    # DeepSeek V4 支持 thinking 开关。这里默认关闭，适合生成博客短文，省 token 也更快。
-    # 如果你想开启思考模式，可以在 GitHub Secrets 里设置：
-    # DEEPSEEK_THINKING=enabled
-    thinking_mode = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
-    if thinking_mode in ["enabled", "disabled"]:
+    # DeepSeek V4 支持 thinking 开关。
+    # disabled：更适合批量生成博客短文，速度和成本更友好。
+    # enabled：更适合复杂推理，但会消耗更多 token。
+    if DEEPSEEK_THINKING in ["enabled", "disabled"]:
         payload["thinking"] = {
-            "type": thinking_mode
+            "type": DEEPSEEK_THINKING
         }
 
     for i in range(3):
@@ -553,7 +580,7 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
             if response.status_code != 200:
                 print(f"❌ DeepSeek HTTP错误：{response.status_code}")
                 print(response.text)
-                time.sleep(2)
+                time.sleep(2 + i * 2)
                 continue
 
             data = response.json()
@@ -562,7 +589,7 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
             if not choices:
                 print("❌ DeepSeek 没有返回 choices。")
                 print(data)
-                time.sleep(2)
+                time.sleep(2 + i * 2)
                 continue
 
             message = choices[0].get("message", {})
@@ -573,11 +600,11 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
 
             print("❌ DeepSeek 返回正文为空。")
             print(data)
-            time.sleep(2)
+            time.sleep(2 + i * 2)
 
         except Exception as e:
             print(f"❌ DeepSeek 请求失败，第 {i + 1} 次：{str(e)}")
-            time.sleep(2)
+            time.sleep(2 + i * 2)
 
     return "❌ AI 分析生成失败。"
 
@@ -588,58 +615,24 @@ def ask_deepseek_single_stock_brief(stock):
     system_prompt = """你是一位严谨的A股市场研究员。
 请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
 你必须严格按照下面格式输出：
-
-**这家公司是做什么的：**
-用3-4句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
-
-**这波为什么会涨：**
-用3-4条 bullet 分析可能原因，比如题材催化、行业消息、业绩预期、政策方向、市场情绪等。
-如果你不确定，要写“可能与……有关”，不要装作确定。"""
-
-    user_prompt = f"""请分析这只股票：
-股票名称：{stock['name']}
-股票代码：{stock['code']}
-最近10个交易日区间涨幅：{stock['total_change']:.2f}%
-最新收盘价：{stock['latest_close']:.2f}
-最近10个交易日红K情况：{detail_text}
-请重点讲清楚：
-1. 这家公司是做什么的。
-2. 它为什么会连续出现这么多红K，资金可能在炒什么。两者加起来150字左右。
-"""
-
-    print(f"🤖 DeepSeek 正在生成个股解读：{stock['name']}({stock['code']})")
-
-    return ask_deepseek(
-        prompt=user_prompt,
-        system_prompt=system_prompt,
-        temperature=0.65,
-        timeout=120
-    )
-
-
-def ask_deepseek_single_stock_brief(stock):
-    detail_text = "；".join(stock["red_days_detail"])
-
-    system_prompt = """你是一位严谨的A股市场研究员。
-请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
-你必须严格按照下面格式输出：
-
 **这家公司是做什么的：**
 用1-2句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
-
 **这波为什么会涨：**
-用1-2条 bullet 分析可能原因，比如题材催化、业绩预期、政策方向等。
+用1-2条 bullet 分析可能原因，比如题材催化、业绩预期、政策方向、行业情绪、市场资金偏好等。
 """
-
     user_prompt = f"""请分析这只股票：
+
 股票名称：{stock['name']}
 股票代码：{stock['code']}
 最近10个交易日区间涨幅：{stock['total_change']:.2f}%
 最新收盘价：{stock['latest_close']:.2f}
 最近10个交易日红K情况：{detail_text}
+
 请重点讲清楚：
 1. 这家公司是做什么的。
-2. 它为什么会连续出现这么多红K，资金可能在炒什么。两者加起来150字左右。
+2. 它为什么会连续出现这么多红K，资金可能在炒什么。
+
+总字数控制在150字左右。
 """
 
     print(f"🤖 DeepSeek 正在生成个股解读：{stock['name']}({stock['code']})")
@@ -650,6 +643,7 @@ def ask_deepseek_single_stock_brief(stock):
         temperature=0.65,
         timeout=120
     )
+
 
 # ================= 写 Hugo 博客 =================
 def write_blog_post(stock_list):
@@ -671,13 +665,15 @@ tags:
     - 红K扫描
     - 全市场扫描
     - 新浪行情
-    - Gemini
+    - DeepSeek
 draft: false
 ---
 
 # 📈 全市场红K雷达：10日8红 / 7日6红强势股扫描
 
-本报告由 **Python + 新浪行情接口 + 本地OHLC缓存 + Gemini AI** 自动生成。
+本报告由 **Python + 新浪行情接口 + 本地OHLC缓存 + DeepSeek AI** 自动生成。
+
+> ⚠️ 风险提示：本文仅为基于公开行情数据的自动化整理与AI文本生成，不构成任何投资建议。股市有风险，交易需谨慎。
 
 扫描条件：
 
@@ -688,7 +684,7 @@ draft: false
 - 入选规则：满足条件A或条件B即可入选
 - 排名方式：按最近10个交易日区间涨幅排序，截取 TOP {TOP_N}
 - 数据来源：新浪行情接口
-- AI模型：{GEMINI_MODEL}
+- AI模型：{DEEPSEEK_MODEL}
 
 ---
 
@@ -762,7 +758,6 @@ draft: false
             md_content += get_sina_chart_html(s["symbol"], s["name"])
 
             stock_brief = ask_deepseek_single_stock_brief(s)
-
             md_content += stock_brief + "\n\n"
 
             md_content += "---\n\n"
