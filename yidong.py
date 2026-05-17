@@ -29,7 +29,11 @@ CACHE_FOLDER = "stock_cache"
 CACHE_FILE = os.path.join(CACHE_FOLDER, "sina_close_cache.csv")
 
 REPORT_PREFIX = "radar"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+# DeepSeek 配置
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
 
 
 # ================= 工具函数 =================
@@ -141,6 +145,29 @@ def get_random_philosophy():
         return "> 💡 **投资哲思**：*“耐心是一切聪明才智的基础。”* —— **柏拉图**"
 
 
+def find_column(columns, keywords):
+    """
+    更稳健地查找 AkShare / 新浪返回字段，避免字段名变化导致 list index 报错。
+    """
+    str_columns = [str(col) for col in columns]
+
+    for keyword in keywords:
+        for col in str_columns:
+            if keyword in col:
+                return col
+
+    for keyword in keywords:
+        for col in str_columns:
+            if keyword.lower() in col.lower():
+                return col
+
+    return None
+
+
+def empty_cache_df():
+    return pd.DataFrame(columns=["symbol", "code", "name", "date", "close"])
+
+
 # ================= 新浪全市场行情 =================
 def get_all_a_stock_spot_sina():
     print("📈 正在通过新浪获取A股全市场实时行情...")
@@ -161,20 +188,14 @@ def get_all_a_stock_spot_sina():
         return None
 
     try:
-        code_col = [col for col in spot_df.columns if "代码" in col or "symbol" in col.lower()][0]
-        name_col = [col for col in spot_df.columns if "名称" in col or "name" in col.lower()][0]
+        code_col = find_column(spot_df.columns, ["代码", "symbol"])
+        name_col = find_column(spot_df.columns, ["名称", "name"])
+        price_col = find_column(spot_df.columns, ["最新价", "最新", "price", "trade"])
 
-        price_cols = [
-            col for col in spot_df.columns
-            if "最新" in col or "price" in col.lower() or "trade" in col.lower()
-        ]
-
-        if not price_cols:
-            print("❌ 新浪实时行情没有找到最新价字段。")
+        if not code_col or not name_col or not price_col:
+            print("❌ 新浪实时行情缺少关键字段。")
             print(spot_df.columns.tolist())
             return None
-
-        price_col = price_cols[0]
 
         spot_df[code_col] = spot_df[code_col].astype(str)
         spot_df[name_col] = spot_df[name_col].astype(str)
@@ -187,14 +208,18 @@ def get_all_a_stock_spot_sina():
         spot_df = spot_df[~spot_df["name"].str.contains("ST|退", regex=True, na=False)].copy()
         spot_df = spot_df[spot_df["close"] > 0].copy()
 
-        date_cols = [col for col in spot_df.columns if "日期" in col or "date" in col.lower()]
-        if date_cols:
-            date_col = date_cols[0]
+        date_col = find_column(spot_df.columns, ["日期", "date"])
+        if date_col:
             spot_df["date"] = spot_df[date_col].apply(normalize_date)
         else:
             spot_df["date"] = get_safe_market_date()
 
-        result = spot_df[["symbol", "code", "name", "date", "close"]].dropna().copy()
+        result = (
+            spot_df[["symbol", "code", "name", "date", "close"]]
+            .dropna(subset=["symbol", "code", "name", "date", "close"])
+            .copy()
+        )
+
         result = result.drop_duplicates(subset=["symbol"], keep="last")
 
         print(f"🚀 新浪返回可用股票数量：{len(result)}")
@@ -210,28 +235,44 @@ def get_all_a_stock_spot_sina():
 def load_cache():
     if not os.path.exists(CACHE_FILE):
         print("🧊 未发现历史缓存，准备首次全量建立缓存。")
-        return pd.DataFrame(columns=["symbol", "code", "name", "date", "close"])
+        return empty_cache_df()
 
     try:
         cache_df = pd.read_csv(CACHE_FILE, dtype={"symbol": str, "code": str})
+
+        required_cols = ["symbol", "code", "name", "date", "close"]
+        for col in required_cols:
+            if col not in cache_df.columns:
+                print(f"⚠️ 缓存缺少字段 {col}，需要重建缓存。")
+                return empty_cache_df()
+
         cache_df["date"] = cache_df["date"].astype(str)
         cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
         cache_df = cache_df.dropna(subset=["symbol", "date", "close"])
+
         print(f"🧊 已加载历史缓存：{len(cache_df)} 行。")
         return cache_df
 
     except Exception as e:
         print(f"⚠️ 历史缓存读取失败，将重建缓存：{str(e)}")
-        return pd.DataFrame(columns=["symbol", "code", "name", "date", "close"])
+        return empty_cache_df()
 
 
 def save_cache(cache_df):
     os.makedirs(CACHE_FOLDER, exist_ok=True)
 
+    if cache_df is None or cache_df.empty:
+        print("⚠️ 缓存为空，本次不写入缓存文件。")
+        return
+
     cache_df = cache_df.dropna(subset=["symbol", "date", "close"]).copy()
     cache_df["date"] = cache_df["date"].astype(str)
     cache_df["close"] = pd.to_numeric(cache_df["close"], errors="coerce")
     cache_df = cache_df.dropna(subset=["close"])
+
+    if cache_df.empty:
+        print("⚠️ 清洗后缓存为空，本次不写入缓存文件。")
+        return
 
     cache_df = cache_df.sort_values(["symbol", "date"])
     cache_df = cache_df.groupby("symbol", group_keys=False).tail(80)
@@ -241,7 +282,7 @@ def save_cache(cache_df):
 
 
 def cache_too_old(cache_df, spot_trade_date):
-    if cache_df.empty:
+    if cache_df is None or cache_df.empty:
         return True
 
     try:
@@ -285,7 +326,7 @@ def fetch_one_history_sina(row, start_date, end_date):
         for _, h in hist_df.iterrows():
             rows.append({
                 "symbol": row["symbol"],
-                "code": row["code"],
+                "code": str(row["code"]).zfill(6),
                 "name": row["name"],
                 "date": h["date"],
                 "close": float(h["close"])
@@ -327,7 +368,8 @@ def rebuild_history_cache_from_sina(spot_df):
                 rows.extend(result_rows)
 
     if not rows:
-        return pd.DataFrame(columns=["symbol", "code", "name", "date", "close"])
+        print("⚠️ 历史缓存重建失败，未获取到历史K线。")
+        return empty_cache_df()
 
     cache_df = pd.DataFrame(rows)
     cache_df = cache_df.drop_duplicates(subset=["symbol", "date"], keep="last")
@@ -345,7 +387,11 @@ def update_cache_with_spot(cache_df, spot_df):
     spot_rows["close"] = pd.to_numeric(spot_rows["close"], errors="coerce")
     spot_rows = spot_rows.dropna(subset=["close"])
 
-    if cache_df.empty:
+    if spot_rows.empty:
+        print("⚠️ 新浪实时行情没有可用close字段，本次不更新当天K线。")
+        return cache_df
+
+    if cache_df is None or cache_df.empty:
         updated = spot_rows.copy()
     else:
         cache_df = cache_df.copy()
@@ -369,6 +415,10 @@ def screen_from_cache(cache_df):
     print("🧮 正在从本地缓存中执行量化筛选...")
 
     results = []
+
+    if cache_df is None or cache_df.empty:
+        print("今日未筛选到符合条件的股票。")
+        return None
 
     cache_df = cache_df.copy()
     cache_df["date"] = cache_df["date"].astype(str)
@@ -459,43 +509,46 @@ def get_surge_stocks():
     return screen_from_cache(cache_df)
 
 
-# ================= Gemini =================
-def ask_gemini(prompt, system_prompt="", temperature=0.35, timeout=180):
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+# ================= DeepSeek =================
+def ask_deepseek(prompt, system_prompt="", temperature=0.35, timeout=180):
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
 
     if not api_key:
-        return "❌ Gemini API Key 未配置。请在 GitHub Secrets 中添加 GEMINI_API_KEY。"
+        return "❌ DeepSeek API Key 未配置。请在 GitHub Secrets 中添加 DEEPSEEK_API_KEY。"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    url = f"{DEEPSEEK_API_BASE.rstrip('/')}/chat/completions"
 
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": api_key
+        "Authorization": f"Bearer {api_key}"
     }
 
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": temperature
-        }
-    }
+    messages = []
 
     if system_prompt:
-        payload["systemInstruction"] = {
-            "parts": [
-                {
-                    "text": system_prompt
-                }
-            ]
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False
+    }
+
+    # DeepSeek V4 支持 thinking 开关。
+    # disabled：更适合批量生成博客短文，速度和成本更友好。
+    # enabled：更适合复杂推理，但会消耗更多 token。
+    if DEEPSEEK_THINKING in ["enabled", "disabled"]:
+        payload["thinking"] = {
+            "type": DEEPSEEK_THINKING
         }
 
     for i in range(3):
@@ -503,61 +556,57 @@ def ask_gemini(prompt, system_prompt="", temperature=0.35, timeout=180):
             response = requests.post(url, headers=headers, json=payload, timeout=timeout)
 
             if response.status_code != 200:
-                print(f"❌ Gemini HTTP错误：{response.status_code}")
+                print(f"❌ DeepSeek HTTP错误：{response.status_code}")
                 print(response.text)
-                time.sleep(2)
+                time.sleep(2 + i * 2)
                 continue
 
             data = response.json()
-            candidates = data.get("candidates", [])
+            choices = data.get("choices", [])
 
-            if not candidates:
-                print("❌ Gemini 没有返回 candidates。")
+            if not choices:
+                print("❌ DeepSeek 没有返回 choices。")
                 print(data)
-                time.sleep(2)
+                time.sleep(2 + i * 2)
                 continue
 
-            parts = candidates[0].get("content", {}).get("parts", [])
-
-            if not parts:
-                print("❌ Gemini 没有返回正文 parts。")
-                print(data)
-                time.sleep(2)
-                continue
-
-            text = parts[0].get("text", "").strip()
+            message = choices[0].get("message", {})
+            text = (message.get("content") or "").strip()
 
             if text:
                 return text
 
-            time.sleep(2)
+            print("❌ DeepSeek 返回正文为空。")
+            print(data)
+            time.sleep(2 + i * 2)
 
         except Exception as e:
-            print(f"❌ Gemini 请求失败，第 {i + 1} 次：{str(e)}")
-            time.sleep(2)
+            print(f"❌ DeepSeek 请求失败，第 {i + 1} 次：{str(e)}")
+            time.sleep(2 + i * 2)
 
     return "❌ AI 分析生成失败。"
 
 
-def ask_gemini_single_stock_brief(stock):
+def ask_deepseek_single_stock_brief(stock):
     """
     只生成单只股票的通俗解读。
-    不再生成“全市场异动扫描结果”“总体结论”等大段内容。
+    不生成“全市场异动扫描结果”“总体结论”等大段内容。
     """
     detail_text = "；".join(stock["surge_days_detail"])
 
     system_prompt = """
 你是一位严谨的A股市场研究员。
-请用通俗易懂的大白话解释股票。
+请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
+如果你无法确定某个原因，必须写“可能与……有关”，不要装作确定。
+避免使用“必涨”“确定上涨”“强烈推荐”“可以买入”等表述。
 
 你必须严格按照下面格式输出：
 
 **这家公司是做什么的：**
-用5-7句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
+用4-6句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
 
 **这波为什么会涨：**
 用2-4条 bullet 分析可能原因，比如题材催化、资金风格、行业消息、业绩预期、政策方向、市场情绪等。
-如果你不确定，要写“可能与……有关”，不要装作确定。
 """
 
     user_prompt = f"""
@@ -576,9 +625,9 @@ def ask_gemini_single_stock_brief(stock):
 
 """
 
-    print(f"🤖 Gemini 正在生成个股解读：{stock['name']}({stock['code']})")
+    print(f"🤖 DeepSeek 正在生成个股解读：{stock['name']}({stock['code']})")
 
-    return ask_gemini(
+    return ask_deepseek(
         prompt=user_prompt,
         system_prompt=system_prompt,
         temperature=0.35,
@@ -605,13 +654,15 @@ tags:
     - AI选股
     - 全市场扫描
     - 新浪行情
-    - Gemini
+    - DeepSeek
 draft: false
 ---
 
 # 🚀 全市场雷达：12日内3次暴涨异动股扫描
 
-本报告由 **Python + 新浪行情接口 + 本地K线缓存 + Gemini AI** 自动生成。
+本报告由 **Python + 新浪行情接口 + 本地K线缓存 + DeepSeek AI** 自动生成。
+
+> ⚠️ 风险提示：本文仅为基于公开行情数据的自动化整理与AI文本生成，不构成任何投资建议。股市有风险，交易需谨慎。
 
 扫描条件：
 
@@ -620,7 +671,7 @@ draft: false
 - 异动标准：至少 **{MIN_SURGE_TIMES}** 次单日涨幅大于 **{SURGE_THRESHOLD}%**
 - 排名方式：按最近区间总涨幅排序，截取 TOP {TOP_N}
 - 数据来源：新浪行情接口
-- AI模型：{GEMINI_MODEL}
+- AI模型：{DEEPSEEK_MODEL}
 
 ---
 
@@ -689,7 +740,7 @@ draft: false
 
             md_content += get_sina_chart_html(s["symbol"], s["name"])
 
-            stock_brief = ask_gemini_single_stock_brief(s)
+            stock_brief = ask_deepseek_single_stock_brief(s)
             md_content += stock_brief + "\n\n"
 
             md_content += "---\n\n"
