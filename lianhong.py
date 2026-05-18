@@ -1,7 +1,9 @@
 import os
 import glob
+import json
 import time
 import random
+import hashlib
 import datetime
 import requests
 import akshare as ak
@@ -37,6 +39,16 @@ REPORT_PREFIX = "redk"
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
+
+# AI 个股解读缓存
+AI_CACHE_FOLDER = "stock_cache"
+AI_CACHE_FILE = os.path.join(AI_CACHE_FOLDER, "deepseek_redk_stock_brief_cache.json")
+
+# 改 prompt 时手动改这个版本号，避免继续使用旧口径缓存
+AI_CACHE_VERSION = "redk_stock_brief_v1"
+
+# AI 缓存最多保留多少天，防止长期无限增长
+AI_CACHE_KEEP_DAYS = 180
 
 
 # ================= 工具函数 =================
@@ -228,7 +240,7 @@ def get_all_a_stock_spot_sina():
         return None
 
 
-# ================= 缓存读写 =================
+# ================= 行情缓存读写 =================
 def empty_cache_df():
     return pd.DataFrame(columns=["symbol", "code", "name", "date", "open", "close"])
 
@@ -303,6 +315,105 @@ def cache_too_old(cache_df, spot_trade_date):
 
     except Exception:
         return True
+
+
+# ================= AI解读缓存读写 =================
+def load_ai_cache():
+    if not os.path.exists(AI_CACHE_FILE):
+        return {}
+
+    try:
+        with open(AI_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            print(f"💾 已加载 DeepSeek 红K个股解读缓存：{len(data)} 条。")
+            return data
+
+        return {}
+
+    except Exception as e:
+        print(f"⚠️ DeepSeek 红K个股解读缓存读取失败，将重新创建：{str(e)}")
+        return {}
+
+
+def save_ai_cache(cache_data):
+    try:
+        os.makedirs(AI_CACHE_FOLDER, exist_ok=True)
+
+        cache_data = prune_ai_cache(cache_data)
+
+        with open(AI_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+
+        print(f"✅ DeepSeek 红K个股解读缓存已保存：{AI_CACHE_FILE}，共 {len(cache_data)} 条。")
+
+    except Exception as e:
+        print(f"⚠️ DeepSeek 红K个股解读缓存保存失败：{str(e)}")
+
+
+def prune_ai_cache(cache_data):
+    if not isinstance(cache_data, dict) or not cache_data:
+        return {}
+
+    cutoff = cn_now() - datetime.timedelta(days=AI_CACHE_KEEP_DAYS)
+    new_cache = {}
+
+    for key, item in cache_data.items():
+        try:
+            created_at = item.get("created_at", "")
+            created_dt = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+
+            if created_dt >= cutoff:
+                new_cache[key] = item
+
+        except Exception:
+            # 老缓存没有 created_at 时先保留，避免误删
+            new_cache[key] = item
+
+    return new_cache
+
+
+def make_stock_brief_cache_key(stock):
+    """
+    缓存 key 由以下内容共同决定：
+
+    - 报告类型
+    - prompt 版本
+    - DeepSeek 模型
+    - 红K筛选参数
+    - 股票代码和名称
+    - 10日/7日红K数量
+    - 命中条件
+    - 区间涨幅
+    - 最新价
+    - 红K日期明细
+
+    这样可以避免：
+    1. 换模型后继续读旧模型缓存；
+    2. 改 prompt 后继续读旧 prompt 缓存；
+    3. 股票数据变化后继续读旧解读。
+    """
+    cache_payload = {
+        "report_prefix": REPORT_PREFIX,
+        "cache_version": AI_CACHE_VERSION,
+        "model": DEEPSEEK_MODEL,
+        "red_window_long": RED_WINDOW_LONG,
+        "red_days_long": RED_DAYS_LONG,
+        "red_window_short": RED_WINDOW_SHORT,
+        "red_days_short": RED_DAYS_SHORT,
+        "code": str(stock.get("code", "")).zfill(6),
+        "name": str(stock.get("name", "")),
+        "red_count_10": int(stock.get("red_count_10", 0)),
+        "red_count_7": int(stock.get("red_count_7", 0)),
+        "condition": str(stock.get("condition", "")),
+        "total_change": round(float(stock.get("total_change", 0)), 2),
+        "latest_close": round(float(stock.get("latest_close", 0)), 2),
+        "red_days_detail": stock.get("red_days_detail", [])
+    }
+
+    raw = json.dumps(cache_payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 # ================= 首次或缓存过旧时：新浪历史K线建缓存 =================
@@ -593,7 +704,7 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
                 continue
 
             message = choices[0].get("message", {})
-            text = message.get("content", "").strip()
+            text = (message.get("content") or "").strip()
 
             if text:
                 return text
@@ -609,17 +720,37 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
     return "❌ AI 分析生成失败。"
 
 
-def ask_deepseek_single_stock_brief(stock):
+def ask_deepseek_single_stock_brief(stock, ai_cache=None):
+    """
+    只生成单只股票的通俗解读。
+    如果同一只股票、同一批红K数据已经生成过，则直接读取缓存。
+    """
+    if ai_cache is None:
+        ai_cache = load_ai_cache()
+
+    cache_key = make_stock_brief_cache_key(stock)
+    cached_item = ai_cache.get(cache_key)
+
+    if cached_item and cached_item.get("text"):
+        print(f"💾 命中 DeepSeek 红K解读缓存：{stock['name']}({stock['code']})")
+        return cached_item["text"]
+
     detail_text = "；".join(stock["red_days_detail"])
 
     system_prompt = """你是一位严谨的A股市场研究员。
 请用通俗易懂的大白话解释股票，不要写投资建议，不要承诺上涨。
+如果你无法确定某个原因，必须写“可能与……有关”，不要装作确定。
+避免使用“必涨”“确定上涨”“强烈推荐”“可以买入”等表述。
+
 你必须严格按照下面格式输出：
+
 **这家公司是做什么的：**
 用1-2句话说明主营业务、产品、客户或所处行业。尽量大白话，不要堆术语。
+
 **这波为什么会涨：**
 用1-2条 bullet 分析可能原因，比如题材催化、业绩预期、政策方向、行业情绪、市场资金偏好等。
 """
+
     user_prompt = f"""请分析这只股票：
 
 股票名称：{stock['name']}
@@ -637,12 +768,33 @@ def ask_deepseek_single_stock_brief(stock):
 
     print(f"🤖 DeepSeek 正在生成个股解读：{stock['name']}({stock['code']})")
 
-    return ask_deepseek(
+    text = ask_deepseek(
         prompt=user_prompt,
         system_prompt=system_prompt,
         temperature=0.65,
         timeout=120
     )
+
+    # 只有成功生成的内容才写入缓存，避免把错误信息缓存进去
+    if text and not text.startswith("❌"):
+        ai_cache[cache_key] = {
+            "created_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model": DEEPSEEK_MODEL,
+            "cache_version": AI_CACHE_VERSION,
+            "stock_code": str(stock["code"]).zfill(6),
+            "stock_name": stock["name"],
+            "red_count_10": int(stock["red_count_10"]),
+            "red_count_7": int(stock["red_count_7"]),
+            "condition": stock["condition"],
+            "total_change": round(float(stock["total_change"]), 2),
+            "latest_close": round(float(stock["latest_close"]), 2),
+            "red_days_detail": stock["red_days_detail"],
+            "text": text
+        }
+
+        save_ai_cache(ai_cache)
+
+    return text
 
 
 # ================= 写 Hugo 博客 =================
@@ -726,6 +878,8 @@ draft: false
 """
 
     else:
+        ai_cache = load_ai_cache()
+
         md_content += "## 今日命中的 TOP 红K活跃股票\n\n"
         md_content += "| 排名 | 股票 | 代码 | 命中条件 | 10日红K数 | 7日红K数 | 10日区间涨幅 | 最新收盘价 |\n"
         md_content += "|---|---|---|---|---:|---:|---:|---:|\n"
@@ -757,7 +911,7 @@ draft: false
 
             md_content += get_sina_chart_html(s["symbol"], s["name"])
 
-            stock_brief = ask_deepseek_single_stock_brief(s)
+            stock_brief = ask_deepseek_single_stock_brief(s, ai_cache=ai_cache)
             md_content += stock_brief + "\n\n"
 
             md_content += "---\n\n"
