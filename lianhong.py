@@ -168,76 +168,114 @@ def find_column(columns, keywords):
     return None
 
 
-# ================= 新浪全市场行情 =================
+# ================= 新浪/网易全市场行情 =================
 def get_all_a_stock_spot_sina():
-    print("📈 正在通过新浪获取A股全市场实时行情...")
+    print("📈 正在通过【新浪/网易】获取A股全市场实时行情...")
 
-    spot_df = None
-
-    for attempt in range(3):
-        try:
-            spot_df = ak.stock_zh_a_spot()
-            if spot_df is not None and not spot_df.empty:
-                print("✅ 新浪全市场行情获取成功！")
-                break
-        except Exception as e:
-            print(f"⚠️ 新浪实时行情获取失败，第 {attempt + 1} 次：{str(e)}")
-            time.sleep(3)
-
-    if spot_df is None or spot_df.empty:
-        return None
-
-    try:
-        code_col = find_column(spot_df.columns, ["代码", "symbol"])
-        name_col = find_column(spot_df.columns, ["名称", "name"])
-        close_col = find_column(spot_df.columns, ["最新价", "最新", "price", "trade"])
-        open_col = find_column(spot_df.columns, ["今开", "开盘", "open"])
-
-        if not code_col or not name_col or not close_col:
-            print("❌ 新浪实时行情缺少关键字段。")
-            print(spot_df.columns.tolist())
-            return None
-
-        spot_df[code_col] = spot_df[code_col].astype(str)
-        spot_df[name_col] = spot_df[name_col].astype(str)
-
-        spot_df["symbol"] = spot_df[code_col].apply(get_market_prefix)
-        spot_df["code"] = spot_df["symbol"].str.extract(r"(\d{6})")
-        spot_df["name"] = spot_df[name_col]
-        spot_df["close"] = pd.to_numeric(spot_df[close_col], errors="coerce")
-
-        if open_col:
-            spot_df["open"] = pd.to_numeric(spot_df[open_col], errors="coerce")
-        else:
-            spot_df["open"] = None
-
-        spot_df = spot_df[~spot_df["name"].str.contains("ST|退", regex=True, na=False)].copy()
-        spot_df = spot_df[spot_df["close"] > 0].copy()
-
-        if "open" in spot_df.columns:
-            spot_df = spot_df[(spot_df["open"].isna()) | (spot_df["open"] > 0)].copy()
-
-        date_col = find_column(spot_df.columns, ["日期", "date"])
-        if date_col:
-            spot_df["date"] = spot_df[date_col].apply(normalize_date)
-        else:
-            spot_df["date"] = get_safe_market_date()
-
-        result = (
-            spot_df[["symbol", "code", "name", "date", "open", "close"]]
-            .dropna(subset=["symbol", "code", "name", "date", "close"])
-            .copy()
+    def clean_code_for_spot(value):
+        text = str(value).lower()
+        text = (
+            text
+            .replace("sh", "")
+            .replace("sz", "")
+            .replace("bj", "")
+            .replace(".0", "")
+            .strip()
         )
 
-        result = result.drop_duplicates(subset=["symbol"], keep="last")
+        digits = "".join([ch for ch in text if ch.isdigit()])
 
-        print(f"🚀 新浪返回可用股票数量：{len(result)}")
-        return result
+        if not digits:
+            return None
 
-    except Exception as e:
-        print(f"❌ 新浪实时行情清洗失败：{str(e)}")
-        print(spot_df.columns.tolist())
-        return None
+        return digits[-6:].zfill(6)
+
+    providers = [
+        ("新浪", lambda: ak.stock_zh_a_spot()),
+        ("网易", lambda: ak.stock_zh_a_spot_netease()),
+    ]
+
+    for source_name, fetcher in providers:
+        for attempt in range(3):
+            try:
+                print(f"🔎 尝试获取 {source_name} 实时行情，第 {attempt + 1} 次...")
+
+                spot_df = fetcher()
+
+                if spot_df is None or spot_df.empty:
+                    print(f"⚠️ {source_name} 返回为空。")
+                    time.sleep(2)
+                    continue
+
+                code_col = find_column(spot_df.columns, ["代码", "symbol", "code"])
+                name_col = find_column(spot_df.columns, ["名称", "name"])
+                close_col = find_column(
+                    spot_df.columns,
+                    ["最新价", "最新", "现价", "收盘", "trade", "price"]
+                )
+                open_col = find_column(
+                    spot_df.columns,
+                    ["今开", "开盘", "open"]
+                )
+
+                if not code_col or not name_col or not close_col or not open_col:
+                    print(f"❌ {source_name} 实时行情缺少红K所需字段。")
+                    print("当前字段：", spot_df.columns.tolist())
+                    time.sleep(2)
+                    continue
+
+                spot_df = spot_df.copy()
+
+                spot_df["code"] = spot_df[code_col].apply(clean_code_for_spot)
+                spot_df = spot_df.dropna(subset=["code"]).copy()
+
+                spot_df["symbol"] = spot_df["code"].apply(get_market_prefix)
+                spot_df["name"] = spot_df[name_col].astype(str)
+
+                spot_df["close"] = pd.to_numeric(spot_df[close_col], errors="coerce")
+                spot_df["open"] = pd.to_numeric(spot_df[open_col], errors="coerce")
+
+                spot_df = spot_df[
+                    spot_df["code"].astype(str).str.match(r"^\d{6}$", na=False)
+                ].copy()
+
+                spot_df = spot_df[
+                    ~spot_df["name"].str.contains("ST|退", regex=True, na=False)
+                ].copy()
+
+                spot_df = spot_df.dropna(subset=["open", "close"]).copy()
+                spot_df = spot_df[(spot_df["open"] > 0) & (spot_df["close"] > 0)].copy()
+
+                date_col = find_column(spot_df.columns, ["日期", "date"])
+
+                if date_col:
+                    spot_df["date"] = spot_df[date_col].apply(normalize_date)
+                else:
+                    spot_df["date"] = get_safe_market_date()
+
+                result = (
+                    spot_df[["symbol", "code", "name", "date", "open", "close"]]
+                    .dropna(subset=["symbol", "code", "name", "date", "open", "close"])
+                    .drop_duplicates(subset=["symbol"], keep="last")
+                    .copy()
+                )
+
+                if result.empty:
+                    print(f"⚠️ {source_name} 清洗后无可用数据。")
+                    time.sleep(2)
+                    continue
+
+                print(f"✅ {source_name} 全市场行情获取成功！")
+                print(f"🚀 {source_name} 返回可用股票数量：{len(result)}")
+
+                return result
+
+            except Exception as e:
+                print(f"⚠️ {source_name} 实时行情获取失败，第 {attempt + 1} 次：{str(e)}")
+                time.sleep(3)
+
+    print("❌ 新浪和网易实时行情均获取失败。")
+    return None
 
 
 # ================= 行情缓存读写 =================
@@ -368,32 +406,12 @@ def prune_ai_cache(cache_data):
                 new_cache[key] = item
 
         except Exception:
-            # 老缓存没有 created_at 时先保留，避免误删
             new_cache[key] = item
 
     return new_cache
 
 
 def make_stock_brief_cache_key(stock):
-    """
-    缓存 key 由以下内容共同决定：
-
-    - 报告类型
-    - prompt 版本
-    - DeepSeek 模型
-    - 红K筛选参数
-    - 股票代码和名称
-    - 10日/7日红K数量
-    - 命中条件
-    - 区间涨幅
-    - 最新价
-    - 红K日期明细
-
-    这样可以避免：
-    1. 换模型后继续读旧模型缓存；
-    2. 改 prompt 后继续读旧 prompt 缓存；
-    3. 股票数据变化后继续读旧解读。
-    """
     cache_payload = {
         "report_prefix": REPORT_PREFIX,
         "cache_version": AI_CACHE_VERSION,
@@ -511,7 +529,7 @@ def update_cache_with_spot(cache_df, spot_df):
     spot_rows = spot_rows.dropna(subset=["open", "close"])
 
     if spot_rows.empty:
-        print("⚠️ 新浪实时行情没有可用open字段，本次不更新当天K线。")
+        print("⚠️ 新浪/网易实时行情没有可用open字段，本次不更新当天K线。")
         return cache_df
 
     if cache_df is None or cache_df.empty:
@@ -530,7 +548,7 @@ def update_cache_with_spot(cache_df, spot_df):
     updated = updated.drop_duplicates(subset=["symbol", "date"], keep="last")
     updated = updated.sort_values(["symbol", "date"])
 
-    print(f"✅ 已用新浪实时行情更新OHLC缓存，当前缓存 {len(updated)} 行。")
+    print(f"✅ 已用新浪/网易实时行情更新OHLC缓存，当前缓存 {len(updated)} 行。")
     return updated
 
 
@@ -676,9 +694,6 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
         "stream": False
     }
 
-    # DeepSeek V4 支持 thinking 开关。
-    # disabled：更适合批量生成博客短文，速度和成本更友好。
-    # enabled：更适合复杂推理，但会消耗更多 token。
     if DEEPSEEK_THINKING in ["enabled", "disabled"]:
         payload["thinking"] = {
             "type": DEEPSEEK_THINKING
@@ -721,10 +736,6 @@ def ask_deepseek(prompt, system_prompt="", temperature=0.65, timeout=180):
 
 
 def ask_deepseek_single_stock_brief(stock, ai_cache=None):
-    """
-    只生成单只股票的通俗解读。
-    如果同一只股票、同一批红K数据已经生成过，则直接读取缓存。
-    """
     if ai_cache is None:
         ai_cache = load_ai_cache()
 
@@ -775,7 +786,6 @@ def ask_deepseek_single_stock_brief(stock, ai_cache=None):
         timeout=120
     )
 
-    # 只有成功生成的内容才写入缓存，避免把错误信息缓存进去
     if text and not text.startswith("❌"):
         ai_cache[cache_key] = {
             "created_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -817,13 +827,14 @@ tags:
     - 红K扫描
     - 全市场扫描
     - 新浪行情
+    - 网易兜底
     - DeepSeek
 draft: false
 ---
 
 # 📈 全市场红K雷达：10日8红 / 7日6红强势股扫描
 
-本报告由 **Python + 新浪行情接口 + 本地OHLC缓存 + DeepSeek AI** 自动生成。
+本报告由 **Python + 新浪/网易行情接口 + 本地OHLC缓存 + DeepSeek AI** 自动生成。
 
 > ⚠️ 风险提示：本文仅为基于公开行情数据的自动化整理与AI文本生成，不构成任何投资建议。股市有风险，交易需谨慎。
 
@@ -835,7 +846,7 @@ draft: false
 - 红K定义：当日 **收盘价 > 开盘价**
 - 入选规则：满足条件A或条件B即可入选
 - 排名方式：按最近10个交易日区间涨幅排序，截取 TOP {TOP_N}
-- 数据来源：新浪行情接口
+- 数据来源：新浪行情接口为主，网易行情接口兜底
 - AI模型：{DEEPSEEK_MODEL}
 
 ---
@@ -846,11 +857,11 @@ draft: false
         md_content += """
 ## 今日扫描结果
 
-今日新浪数据抓取失败，未能完成全市场红K扫描。
+今日新浪/网易数据抓取失败，未能完成全市场红K扫描。
 
 可能原因包括：
 
-- 新浪接口临时不可用
+- 新浪/网易接口临时不可用
 - GitHub Actions 海外网络异常
 - AkShare 接口字段变化
 - 请求频率过高被临时限制
