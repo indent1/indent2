@@ -16,8 +16,8 @@ SURGE_THRESHOLD = 7.0               # 单日涨幅大于7%
 MIN_SURGE_TIMES = 3                 # 至少出现3次
 TOP_N = 10                          # 最终给AI分析前10名
 
-# 新浪接口别开太高，海外IP建议 4~6
-MAX_WORKERS = 5
+# 全市场逐只拉历史K线，别开太高，海外IP建议 3~4
+MAX_WORKERS = 3
 
 # 拉最近45个自然日，足够覆盖12个交易日
 HIST_CALENDAR_DAYS = 45
@@ -29,34 +29,81 @@ POST_FOLDER = "content/post"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
 
+# ================= 工具函数：北京时间 =================
+def cn_now():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+
 # ================= 工具函数：获取日期区间 =================
 def get_date_range():
-    end_date = datetime.datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=HIST_CALENDAR_DAYS)).strftime("%Y%m%d")
+    end_date = cn_now().strftime("%Y%m%d")
+    start_date = (cn_now() - datetime.timedelta(days=HIST_CALENDAR_DAYS)).strftime("%Y%m%d")
     return start_date, end_date
+
+
+# ================= 工具函数：清洗股票代码 =================
+def clean_stock_code(code):
+    """
+    把 sh600000、sz000001、bj430047、600000、600000.0 等格式统一成 6 位纯数字代码。
+    """
+    text = str(code).lower()
+    text = (
+        text
+        .replace("sh", "")
+        .replace("sz", "")
+        .replace("bj", "")
+        .replace(".0", "")
+        .strip()
+    )
+
+    digits = "".join([ch for ch in text if ch.isdigit()])
+
+    if not digits:
+        return None
+
+    return digits[-6:].zfill(6)
 
 
 # ================= 工具函数：识别新浪市场前缀 =================
 def get_market_prefix(code):
-    code_str = str(code)
+    code_str = clean_stock_code(code)
 
-    code_str = (
-        code_str
-        .replace("sh", "")
-        .replace("sz", "")
-        .replace("bj", "")
-        .strip()
-        .zfill(6)
-    )
+    if not code_str:
+        return None
 
     if code_str.startswith("6"):
         return f"sh{code_str}"
     elif code_str.startswith("0") or code_str.startswith("3"):
         return f"sz{code_str}"
-    elif code_str.startswith("4") or code_str.startswith("8"):
+    elif code_str.startswith("4") or code_str.startswith("8") or code_str.startswith("9"):
         return f"bj{code_str}"
 
     return f"sh{code_str}"
+
+
+# ================= 工具函数：日期标准化 =================
+def normalize_date(value):
+    try:
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    except Exception:
+        return cn_now().strftime("%Y-%m-%d")
+
+
+# ================= 工具函数：字段查找 =================
+def find_column(columns, keywords):
+    str_columns = [str(col) for col in columns]
+
+    for keyword in keywords:
+        for col in str_columns:
+            if keyword in col:
+                return col
+
+    for keyword in keywords:
+        for col in str_columns:
+            if keyword.lower() in col.lower():
+                return col
+
+    return None
 
 
 # ================= 工具函数：对接“一言” API，获取哲学盲盒 =================
@@ -87,86 +134,181 @@ def get_random_philosophy():
         return "> 💡 **投资哲思**：*“耐心是一切聪明才智的基础。”* —— **柏拉图**"
 
 
-# ================= 核心1-1：通过新浪获取全市场股票名单 =================
-def get_all_a_stock_list_sina():
-    print("📈 正在通过新浪接口获取A股全市场最新名单...")
-
-    spot_df = None
-
-    for attempt in range(3):
-        try:
-            spot_df = ak.stock_zh_a_spot()
-
-            if spot_df is not None and not spot_df.empty:
-                print("✅ 新浪全市场名单获取成功！")
-                break
-
-        except Exception as e:
-            print(f"⚠️ 新浪全市场名单获取失败，第 {attempt + 1} 次：{str(e)}")
-            time.sleep(3)
-
+# ================= 核心1-1：清洗全市场股票名单 =================
+def normalize_stock_list_df(spot_df, source_name):
     if spot_df is None or spot_df.empty:
-        print("❌ 无法通过新浪获取全市场股票列表。")
         return None
 
     try:
-        code_col = [col for col in spot_df.columns if "代码" in col or "symbol" in col.lower()][0]
-        name_col = [col for col in spot_df.columns if "名称" in col or "name" in col.lower()][0]
+        code_col = find_column(spot_df.columns, ["代码", "symbol", "code"])
+        name_col = find_column(spot_df.columns, ["名称", "name"])
 
-        spot_df[code_col] = spot_df[code_col].astype(str)
-        spot_df[name_col] = spot_df[name_col].astype(str)
+        if not code_col or not name_col:
+            print(f"❌ {source_name} 全市场名单缺少关键字段。")
+            print("当前字段：")
+            print(spot_df.columns.tolist())
+            return None
 
-        spot_df["市场代码"] = spot_df[code_col].apply(get_market_prefix)
-        spot_df["纯数字代码"] = spot_df["市场代码"].str.extract(r"(\d{6})")
+        df = spot_df.copy()
+
+        df["纯数字代码"] = df[code_col].apply(clean_stock_code)
+        df = df.dropna(subset=["纯数字代码"]).copy()
+
+        df["市场代码"] = df["纯数字代码"].apply(get_market_prefix)
+        df[name_col] = df[name_col].astype(str)
 
         # 剔除 ST、*ST、退市股
-        spot_df = spot_df[~spot_df[name_col].str.contains("ST|退", regex=True, na=False)].copy()
+        df = df[~df[name_col].str.contains(r"\*?ST|退", regex=True, na=False)].copy()
 
         # 如果有最新价字段，剔除停牌或无价格股票
-        price_cols = [col for col in spot_df.columns if "最新" in col or "price" in col.lower()]
-        if price_cols:
-            price_col = price_cols[0]
-            spot_df[price_col] = pd.to_numeric(spot_df[price_col], errors="coerce")
-            spot_df = spot_df[spot_df[price_col] > 0].copy()
+        price_col = find_column(df.columns, ["最新价", "最新", "现价", "收盘", "price", "trade"])
 
-        all_symbols = spot_df["市场代码"].dropna().unique().tolist()
+        if price_col:
+            df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+            df = df[df[price_col] > 0].copy()
 
-        name_dict = dict(zip(spot_df["市场代码"], spot_df[name_col]))
-        pure_code_dict = dict(zip(spot_df["市场代码"], spot_df["纯数字代码"]))
+        df = df.dropna(subset=["市场代码", "纯数字代码"]).copy()
+        df = df.drop_duplicates(subset=["市场代码"], keep="last")
 
-        print(f"🚀 新浪成功返回全市场名单，剔除ST/退市/无价格后共计 {len(all_symbols)} 只股票。")
+        all_symbols = df["市场代码"].dropna().unique().tolist()
+        name_dict = dict(zip(df["市场代码"], df[name_col]))
+        pure_code_dict = dict(zip(df["市场代码"], df["纯数字代码"]))
 
+        if not all_symbols:
+            print(f"⚠️ {source_name} 清洗后股票名单为空。")
+            return None
+
+        print(f"🚀 {source_name} 返回全市场名单，剔除ST/退市/无价格后共计 {len(all_symbols)} 只股票。")
         return all_symbols, name_dict, pure_code_dict
 
     except Exception as e:
-        print(f"❌ 新浪名单清洗失败：{str(e)}")
+        print(f"❌ {source_name} 名单清洗失败：{str(e)}")
         print("当前字段：")
         print(spot_df.columns.tolist())
         return None
 
 
+# ================= 核心1-1：多接口获取全市场股票名单 =================
+def get_all_a_stock_list_sina():
+    print("📈 正在获取A股全市场最新名单：新浪优先，网易/东方财富兜底...")
+
+    providers = [
+        ("新浪", lambda: ak.stock_zh_a_spot()),
+        ("网易", lambda: ak.stock_zh_a_spot_netease()),
+        ("东方财富", lambda: ak.stock_zh_a_spot_em()),
+    ]
+
+    for source_name, fetcher in providers:
+        for attempt in range(3):
+            try:
+                print(f"🔎 尝试获取 {source_name} 全市场名单，第 {attempt + 1} 次...")
+
+                raw_df = fetcher()
+                result = normalize_stock_list_df(raw_df, source_name)
+
+                if result is not None:
+                    print(f"✅ {source_name} 全市场名单获取成功！")
+                    return result
+
+                print(f"⚠️ {source_name} 返回为空或字段异常。")
+                time.sleep(2 + attempt * 2)
+
+            except AttributeError as e:
+                print(f"⚠️ 当前 AkShare 版本可能没有 {source_name} 接口：{str(e)}")
+                break
+
+            except Exception as e:
+                print(f"⚠️ {source_name} 全市场名单获取失败，第 {attempt + 1} 次：{str(e)}")
+                time.sleep(3 + attempt * 2)
+
+    print("❌ 新浪、网易、东方财富全市场名单均获取失败。")
+    return None
+
+
+# ================= 核心1-2：历史K线标准化 =================
+def normalize_hist_df(hist_df):
+    if hist_df is None or hist_df.empty:
+        return None
+
+    date_col = find_column(hist_df.columns, ["日期", "date"])
+    close_col = find_column(hist_df.columns, ["收盘", "close"])
+
+    if not date_col or not close_col:
+        return None
+
+    df = hist_df[[date_col, close_col]].copy()
+    df.columns = ["date", "close"]
+
+    df["date"] = df["date"].apply(normalize_date)
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df.dropna(subset=["date", "close"])
+    df = df.drop_duplicates(subset=["date"], keep="last")
+    df = df.sort_values("date")
+
+    if df.empty:
+        return None
+
+    return df
+
+
 # ================= 核心1-2：扫描单只股票的最近12个交易日 =================
 def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date):
+    code = pure_code_dict.get(symbol, clean_stock_code(symbol))
+    name = name_dict.get(symbol, "未知名称")
+
+    if not code:
+        return None
+
+    hist_df = None
+
+    # 第一优先：东方财富历史K线，symbol 用 6 位代码
     try:
-        # 随机延迟，降低被新浪限制的概率
         time.sleep(random.uniform(0.08, 0.25))
 
-        hist_df = ak.stock_zh_a_daily(
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            adjust=""
-        )
+        try:
+            raw_hist_df = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="",
+                timeout=10
+            )
+        except TypeError:
+            raw_hist_df = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust=""
+            )
 
+        hist_df = normalize_hist_df(raw_hist_df)
+
+    except Exception as e:
+        print(f"⚠️ 东方财富历史K线失败：{name}({code})，{str(e)}")
+
+    # 第二兜底：新浪历史K线，symbol 用 sh/sz/bj 前缀
+    if hist_df is None or hist_df.empty:
+        try:
+            time.sleep(random.uniform(0.15, 0.35))
+
+            raw_hist_df = ak.stock_zh_a_daily(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=""
+            )
+
+            hist_df = normalize_hist_df(raw_hist_df)
+
+        except Exception as e:
+            print(f"⚠️ 新浪历史K线也失败：{name}({symbol})，{str(e)}")
+            return None
+
+    try:
         if hist_df is None or hist_df.empty:
             return None
-
-        if "date" not in hist_df.columns or "close" not in hist_df.columns:
-            return None
-
-        hist_df = hist_df.sort_values("date").copy()
-        hist_df["close"] = pd.to_numeric(hist_df["close"], errors="coerce")
-        hist_df = hist_df.dropna(subset=["close"])
 
         # 计算最近12个交易日涨幅，需要至少13根K线
         if len(hist_df) < LOOKBACK_TRADING_DAYS + 1:
@@ -204,12 +346,9 @@ def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date)
                     f"{row['date']} 涨幅 {day_change:.2f}%"
                 )
 
-        name = name_dict.get(symbol, "未知名称")
-        pure_code = pure_code_dict.get(symbol, symbol)
-
         return {
             "name": name,
-            "code": pure_code,
+            "code": code,
             "symbol": symbol,
             "times": count_surge_days,
             "total_change": total_change,
@@ -217,11 +356,12 @@ def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date)
             "surge_days_detail": surge_days_detail
         }
 
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 扫描单股失败：{name}({code})，{str(e)}")
         return None
 
 
-# ================= 核心1-3：全市场量化扫描 新浪并发版 =================
+# ================= 核心1-3：全市场量化扫描 多接口并发版 =================
 def get_pattern_surge_stocks_all_market():
     stock_info = get_all_a_stock_list_sina()
 
@@ -233,10 +373,11 @@ def get_pattern_surge_stocks_all_market():
 
     start_date, end_date = get_date_range()
 
-    print(f"⏳ 开始通过新浪扫描最近 {HIST_CALENDAR_DAYS} 个自然日K线。")
+    print(f"⏳ 开始扫描最近 {HIST_CALENDAR_DAYS} 个自然日K线。")
     print(f"🎯 条件：最近 {LOOKBACK_TRADING_DAYS} 个交易日内，至少 {MIN_SURGE_TIMES} 次单日涨幅 > {SURGE_THRESHOLD}%。")
     print(f"🚀 当前并发线程数：{MAX_WORKERS}")
     print(f"📅 数据区间：{start_date} ~ {end_date}")
+    print("📡 历史K线接口：东方财富优先，新浪兜底。")
 
     surge_list_data = []
     finished = 0
@@ -461,8 +602,8 @@ def ask_gemini_to_analyze_for_blog(stock_list):
 
 # ================= 核心3：生成 Hugo 博客文章 =================
 def write_blog_post(stock_list):
-    today_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    post_time = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    today_date = cn_now().strftime("%Y-%m-%d")
+    post_time = cn_now().strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
     os.makedirs(POST_FOLDER, exist_ok=True)
 
@@ -478,14 +619,16 @@ categories:
 tags:
     - AI选股
     - 全市场扫描
-    - 新浪行情
+    - 多接口行情
+    - 东方财富
+    - 新浪兜底
     - Gemini
 draft: false
 ---
 
 # 🚀 全市场雷达：12日内3次暴涨异动股扫描
 
-本报告由 **Python + 新浪行情接口 + Gemini AI** 自动生成。
+本报告由 **Python + 多接口行情数据 + Gemini AI** 自动生成。
 
 扫描条件：
 
@@ -493,7 +636,7 @@ draft: false
 - 时间窗口：最近 **{LOOKBACK_TRADING_DAYS}** 个交易日
 - 异动标准：至少 **{MIN_SURGE_TIMES}** 次单日涨幅大于 **{SURGE_THRESHOLD}%**
 - 排名方式：按最近区间总涨幅排序，截取 TOP {TOP_N}
-- 数据来源：新浪行情接口
+- 数据来源：名单接口使用新浪/网易/东方财富兜底，历史K线使用东方财富优先、反向兜底新浪
 - AI模型：{GEMINI_MODEL}
 
 ---
@@ -527,7 +670,7 @@ draft: false
 
 可能原因包括：
 
-- 新浪行情接口临时不可用
+- 行情接口临时不可用
 - GitHub Actions 海外网络访问异常
 - AkShare 接口返回字段变化
 - 请求频率过高被临时限制
