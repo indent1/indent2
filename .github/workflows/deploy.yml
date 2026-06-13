@@ -45,6 +45,15 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Restore stock cache
+        uses: actions/cache@v4
+        with:
+          path: stock_cache
+          key: stock-cache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_number }}
+          restore-keys: |
+            stock-cache-${{ runner.os }}-${{ github.ref_name }}-
+            stock-cache-${{ runner.os }}-
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
