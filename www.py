@@ -18,8 +18,8 @@ SURGE_THRESHOLD = 7.0               # 单日涨幅大于7%
 MIN_SURGE_TIMES = 3                 # 至少出现3次
 TOP_N = 10                          # 最终给AI分析前10名
 
-# 全市场逐只拉历史K线，别开太高，海外IP建议 3~4
-MAX_WORKERS = 3
+# 全市场逐只拉历史K线，别开太高，海外IP建议 3~6
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "6"))
 
 # 拉最近45个自然日，足够覆盖12个交易日
 HIST_CALENDAR_DAYS = 45
@@ -34,8 +34,10 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled").strip().lower()
 
-# AI 个股解读缓存
+# 缓存目录
 AI_CACHE_FOLDER = "stock_cache"
+
+# AI 个股解读缓存
 AI_CACHE_FILE = os.path.join(AI_CACHE_FOLDER, "deepseek_12surge_stock_brief_cache.json")
 
 # 改 prompt 时手动改这个版本号，避免继续使用旧口径缓存
@@ -43,6 +45,19 @@ AI_CACHE_VERSION = "deepseek_12surge_stock_brief_v1"
 
 # AI 缓存最多保留多少天，防止长期无限增长
 AI_CACHE_KEEP_DAYS = 180
+
+# ================= 历史K线缓存 =================
+HIST_CACHE_FOLDER = os.path.join(AI_CACHE_FOLDER, "hist_daily_sina")
+HIST_CACHE_KEEP_DAYS = 120
+
+# 是否强制刷新历史K线缓存：GitHub Actions 里可设置 FORCE_REFRESH_HIST=1
+FORCE_REFRESH_HIST = os.environ.get("FORCE_REFRESH_HIST", "0").strip() == "1"
+
+# ================= 扫描结果缓存 =================
+SCAN_CACHE_FILE = os.path.join(AI_CACHE_FOLDER, "scan_12surge_result_cache.json")
+
+# 是否启用扫描结果缓存：设置 USE_SCAN_CACHE=0 可关闭
+USE_SCAN_CACHE = os.environ.get("USE_SCAN_CACHE", "1").strip() != "0"
 
 
 # ================= 工具函数：北京时间 =================
@@ -148,6 +163,49 @@ def find_column(columns, keywords):
                 return col
 
     return None
+
+
+# ================= 工具函数：获取最近已收盘交易日 =================
+def get_latest_finished_trade_date():
+    """
+    返回最近一个已完成交易日，格式：YYYY-MM-DD。
+    如果当天还没到16点，默认使用上一个交易日，避免盘中日K未收盘。
+    """
+    now = cn_now()
+    today = now.date()
+
+    try:
+        trade_df = ak.tool_trade_date_hist_sina()
+        date_col = find_column(trade_df.columns, ["trade_date", "日期", "date"])
+
+        if date_col:
+            dates = pd.to_datetime(trade_df[date_col], errors="coerce").dropna().dt.date
+
+            if now.hour < 16:
+                dates = dates[dates < today]
+            else:
+                dates = dates[dates <= today]
+
+            if not dates.empty:
+                latest_date = dates.max().strftime("%Y-%m-%d")
+                print(f"📅 最近已收盘交易日：{latest_date}")
+                return latest_date
+
+    except Exception as e:
+        print(f"⚠️ 交易日历获取失败，使用简易工作日兜底：{str(e)}")
+
+    # 兜底：按工作日粗略处理，不识别节假日
+    d = today
+
+    if now.hour < 16:
+        d = d - datetime.timedelta(days=1)
+
+    while d.weekday() >= 5:
+        d = d - datetime.timedelta(days=1)
+
+    latest_date = d.strftime("%Y-%m-%d")
+    print(f"📅 最近已收盘交易日，兜底判断：{latest_date}")
+    return latest_date
 
 
 # ================= 工具函数：对接“一言” API，获取哲学盲盒 =================
@@ -301,10 +359,276 @@ def normalize_hist_df(hist_df):
     return df
 
 
-# ================= 核心1-2：扫描单只股票的最近12个交易日 =================
-def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date):
+# ================= 历史K线缓存：读写和增量更新 =================
+def get_hist_cache_path(symbol):
+    os.makedirs(HIST_CACHE_FOLDER, exist_ok=True)
+    safe_symbol = str(symbol).replace("/", "_").replace("\\", "_")
+    return os.path.join(HIST_CACHE_FOLDER, f"{safe_symbol}.pkl.gz")
+
+
+def empty_hist_df():
+    return pd.DataFrame(columns=["date", "close"])
+
+
+def load_hist_cache(symbol):
+    path = get_hist_cache_path(symbol)
+
+    if not os.path.exists(path):
+        return None, ""
+
+    try:
+        payload = pd.read_pickle(path, compression="gzip")
+
+        if isinstance(payload, dict):
+            df = payload.get("df")
+            checked_trade_date = payload.get("checked_trade_date", "")
+        else:
+            df = payload
+            checked_trade_date = ""
+
+        if df is None or df.empty:
+            return empty_hist_df(), checked_trade_date
+
+        df = df[["date", "close"]].copy()
+        df["date"] = df["date"].apply(normalize_date)
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df = df.dropna(subset=["date", "close"])
+        df = df.drop_duplicates(subset=["date"], keep="last")
+        df = df.sort_values("date")
+
+        return df, checked_trade_date
+
+    except Exception as e:
+        print(f"⚠️ 历史K线缓存读取失败：{symbol}，{str(e)}")
+        return None, ""
+
+
+def save_hist_cache(symbol, df, checked_trade_date):
+    try:
+        os.makedirs(HIST_CACHE_FOLDER, exist_ok=True)
+        path = get_hist_cache_path(symbol)
+
+        if df is None:
+            df = empty_hist_df()
+
+        payload = {
+            "symbol": symbol,
+            "checked_trade_date": checked_trade_date,
+            "updated_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "df": df
+        }
+
+        tmp_path = path + ".tmp"
+        pd.to_pickle(payload, tmp_path, compression="gzip")
+        os.replace(tmp_path, path)
+
+    except Exception as e:
+        print(f"⚠️ 历史K线缓存保存失败：{symbol}，{str(e)}")
+
+
+def slice_hist_range(df, start_date, end_date):
+    if df is None or df.empty:
+        return None
+
+    start_dash = normalize_date(start_date)
+    end_dash = normalize_date(end_date)
+
+    sliced = df[(df["date"] >= start_dash) & (df["date"] <= end_dash)].copy()
+
+    if sliced.empty:
+        return None
+
+    return sliced.sort_values("date")
+
+
+def prune_hist_cache():
+    try:
+        if not os.path.exists(HIST_CACHE_FOLDER):
+            return
+
+        cutoff_ts = time.time() - HIST_CACHE_KEEP_DAYS * 86400
+        removed_count = 0
+
+        for path in glob.glob(os.path.join(HIST_CACHE_FOLDER, "*.pkl.gz")):
+            if os.path.getmtime(path) < cutoff_ts:
+                os.remove(path)
+                removed_count += 1
+
+        if removed_count:
+            print(f"🧹 已清理过期历史K线缓存：{removed_count} 个文件。")
+
+    except Exception as e:
+        print(f"⚠️ 历史K线缓存清理失败：{str(e)}")
+
+
+def fetch_hist_sina_with_cache(symbol, start_date, end_date, latest_trade_date):
     """
-    历史K线使用新浪 ak.stock_zh_a_daily()。
+    优先读取本地K线缓存。
+    如果缓存已经检查过 latest_trade_date，就不再请求新浪。
+    如果缓存较旧，则只尝试补最新缺失部分。
+    """
+    cached_df, checked_trade_date = load_hist_cache(symbol)
+
+    if not FORCE_REFRESH_HIST and cached_df is not None:
+        cached_slice = slice_hist_range(cached_df, start_date, end_date)
+
+        cached_max_date = ""
+        if not cached_df.empty:
+            cached_max_date = str(cached_df["date"].max())
+
+        # 已经检查过当前交易日，或者缓存最大日期已经覆盖当前交易日，直接使用缓存
+        if checked_trade_date == latest_trade_date or cached_max_date >= latest_trade_date:
+            return cached_slice
+
+    try:
+        fetch_start = start_date
+
+        if cached_df is not None and not cached_df.empty:
+            cached_max_date = str(cached_df["date"].max())
+            next_day = (pd.to_datetime(cached_max_date) + pd.Timedelta(days=1)).strftime("%Y%m%d")
+
+            if next_day <= end_date:
+                fetch_start = max(start_date, next_day)
+
+        # 只有真正请求网络时才 sleep，缓存命中不 sleep
+        time.sleep(random.uniform(0.03, 0.12))
+
+        raw_hist_df = ak.stock_zh_a_daily(
+            symbol=symbol,
+            start_date=fetch_start,
+            end_date=end_date,
+            adjust=""
+        )
+
+        new_df = normalize_hist_df(raw_hist_df)
+
+        if cached_df is not None and not cached_df.empty and new_df is not None and not new_df.empty:
+            merged_df = pd.concat([cached_df, new_df], ignore_index=True)
+        elif cached_df is not None and not cached_df.empty:
+            merged_df = cached_df
+        elif new_df is not None and not new_df.empty:
+            merged_df = new_df
+        else:
+            merged_df = empty_hist_df()
+
+        if not merged_df.empty:
+            merged_df["date"] = merged_df["date"].apply(normalize_date)
+            merged_df["close"] = pd.to_numeric(merged_df["close"], errors="coerce")
+            merged_df = merged_df.dropna(subset=["date", "close"])
+            merged_df = merged_df.drop_duplicates(subset=["date"], keep="last")
+            merged_df = merged_df.sort_values("date")
+
+            # 只保留最近一段，防止缓存无限变大
+            cutoff_day = (
+                pd.to_datetime(latest_trade_date) -
+                pd.Timedelta(days=max(HIST_CALENDAR_DAYS * 3, 120))
+            ).strftime("%Y-%m-%d")
+
+            merged_df = merged_df[merged_df["date"] >= cutoff_day].copy()
+
+        save_hist_cache(symbol, merged_df, latest_trade_date)
+
+        return slice_hist_range(merged_df, start_date, end_date)
+
+    except Exception as e:
+        print(f"⚠️ 新浪历史K线失败：{symbol}，{str(e)}")
+
+        # 网络失败时，如果有旧缓存，尽量用旧缓存兜底
+        if cached_df is not None and not cached_df.empty:
+            return slice_hist_range(cached_df, start_date, end_date)
+
+        return None
+
+
+# ================= 扫描结果缓存 =================
+def make_scan_cache_key(latest_trade_date):
+    payload = {
+        "report_prefix": REPORT_PREFIX,
+        "latest_trade_date": latest_trade_date,
+        "lookback_trading_days": LOOKBACK_TRADING_DAYS,
+        "surge_threshold": SURGE_THRESHOLD,
+        "min_surge_times": MIN_SURGE_TIMES,
+        "top_n": TOP_N,
+        "hist_calendar_days": HIST_CALENDAR_DAYS,
+        "cache_version": "scan_result_v1"
+    }
+
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def load_scan_cache(latest_trade_date):
+    if not USE_SCAN_CACHE or FORCE_REFRESH_HIST:
+        return False, None
+
+    if not os.path.exists(SCAN_CACHE_FILE):
+        return False, None
+
+    try:
+        with open(SCAN_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        key = make_scan_cache_key(latest_trade_date)
+        item = data.get(key)
+
+        if not item:
+            return False, None
+
+        print(f"💾 命中扫描结果缓存：交易日 {latest_trade_date}")
+
+        if item.get("status") == "NO_RESULT":
+            return True, None
+
+        if item.get("status") == "OK":
+            return True, item.get("stock_list", [])
+
+        return False, None
+
+    except Exception as e:
+        print(f"⚠️ 扫描结果缓存读取失败：{str(e)}")
+        return False, None
+
+
+def save_scan_cache(latest_trade_date, stock_list):
+    try:
+        os.makedirs(os.path.dirname(SCAN_CACHE_FILE), exist_ok=True)
+
+        if os.path.exists(SCAN_CACHE_FILE):
+            with open(SCAN_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = {}
+
+        key = make_scan_cache_key(latest_trade_date)
+
+        if stock_list is None:
+            data[key] = {
+                "created_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+                "latest_trade_date": latest_trade_date,
+                "status": "NO_RESULT",
+                "stock_list": None
+            }
+        else:
+            data[key] = {
+                "created_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+                "latest_trade_date": latest_trade_date,
+                "status": "OK",
+                "stock_list": stock_list
+            }
+
+        with open(SCAN_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        print(f"✅ 扫描结果缓存已保存：{SCAN_CACHE_FILE}")
+
+    except Exception as e:
+        print(f"⚠️ 扫描结果缓存保存失败：{str(e)}")
+
+
+# ================= 核心1-2：扫描单只股票的最近12个交易日 =================
+def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date, latest_trade_date):
+    """
+    历史K线使用新浪 ak.stock_zh_a_daily()，并增加本地缓存。
     """
     code = pure_code_dict.get(symbol, clean_stock_code(symbol))
     name = name_dict.get(symbol, "未知名称")
@@ -312,23 +636,12 @@ def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date)
     if not code:
         return None
 
-    hist_df = None
-
-    try:
-        time.sleep(random.uniform(0.08, 0.25))
-
-        raw_hist_df = ak.stock_zh_a_daily(
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            adjust=""
-        )
-
-        hist_df = normalize_hist_df(raw_hist_df)
-
-    except Exception as e:
-        print(f"⚠️ 新浪历史K线失败：{name}({symbol})，{str(e)}")
-        return None
+    hist_df = fetch_hist_sina_with_cache(
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        latest_trade_date=latest_trade_date
+    )
 
     try:
         if hist_df is None or hist_df.empty:
@@ -387,6 +700,14 @@ def scan_one_stock_sina(symbol, name_dict, pure_code_dict, start_date, end_date)
 
 # ================= 核心1-3：全市场量化扫描 =================
 def get_pattern_surge_stocks_all_market():
+    latest_trade_date = get_latest_finished_trade_date()
+
+    cache_hit, cached_stock_list = load_scan_cache(latest_trade_date)
+    if cache_hit:
+        return cached_stock_list
+
+    prune_hist_cache()
+
     stock_info = get_all_a_stock_list_sina()
 
     if stock_info is None:
@@ -395,13 +716,19 @@ def get_pattern_surge_stocks_all_market():
     all_symbols, name_dict, pure_code_dict = stock_info
     total_stocks = len(all_symbols)
 
-    start_date, end_date = get_date_range()
+    end_date = latest_trade_date.replace("-", "")
+    start_date = (
+        pd.to_datetime(latest_trade_date) -
+        pd.Timedelta(days=HIST_CALENDAR_DAYS)
+    ).strftime("%Y%m%d")
 
     print(f"⏳ 开始扫描最近 {HIST_CALENDAR_DAYS} 个自然日K线。")
     print(f"🎯 条件：最近 {LOOKBACK_TRADING_DAYS} 个交易日内，至少 {MIN_SURGE_TIMES} 次单日涨幅 > {SURGE_THRESHOLD}%。")
     print(f"🚀 当前并发线程数：{MAX_WORKERS}")
     print(f"📅 数据区间：{start_date} ~ {end_date}")
+    print(f"📅 最近已收盘交易日：{latest_trade_date}")
     print("📡 历史K线接口：新浪 stock_zh_a_daily。")
+    print("💾 历史K线缓存：已启用。")
 
     surge_list_data = []
     finished = 0
@@ -414,7 +741,8 @@ def get_pattern_surge_stocks_all_market():
                 name_dict,
                 pure_code_dict,
                 start_date,
-                end_date
+                end_date,
+                latest_trade_date
             ): symbol
             for symbol in all_symbols
         }
@@ -425,7 +753,12 @@ def get_pattern_surge_stocks_all_market():
             if finished % 100 == 0:
                 print(f"🔄 扫描进度：{finished} / {total_stocks}，当前命中：{len(surge_list_data)}")
 
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception as e:
+                symbol = futures.get(future, "未知代码")
+                print(f"⚠️ 线程任务异常：{symbol}，{str(e)}")
+                continue
 
             if result is not None:
                 surge_list_data.append(result)
@@ -437,6 +770,7 @@ def get_pattern_surge_stocks_all_market():
                 )
 
     if not surge_list_data:
+        save_scan_cache(latest_trade_date, None)
         return None
 
     surge_list_data = sorted(
@@ -451,6 +785,8 @@ def get_pattern_surge_stocks_all_market():
         f"🎯 扫描完毕！全市场共选出 {len(surge_list_data)} 只符合条件的股票，"
         f"已截取最强 TOP {TOP_N} 准备提交 DeepSeek 分析。"
     )
+
+    save_scan_cache(latest_trade_date, top_stocks)
 
     return top_stocks
 
@@ -732,7 +1068,7 @@ draft: false
 - 排名方式：按最近区间总涨幅排序，截取 TOP {TOP_N}
 - 数据来源：名单接口使用新浪行情接口为主、网易行情接口兜底；历史K线使用新浪历史K线接口
 - AI模型：{DEEPSEEK_MODEL}
-- AI缓存：已解析过且扫描数据一致的个股，会优先读取本地缓存
+- 缓存机制：历史K线、扫描结果、AI个股解读均启用本地缓存
 
 ---
 
