@@ -93,11 +93,11 @@ jobs:
           echo "2. Running lianhong.py..."
           python lianhong.py || echo "lianhong.py failed"
           
-          # echo "3. Running www.py..."
-          # python www.py || echo "www.py failed"
+          echo "3. Running www.py..."
+          python www.py || echo "www.py failed"
           
-          echo "4. Running yidong.py..."
-          python yidong.py || echo "yidong.py failed"
+          #echo "4. Running yidong.py..."
+          #python yidong.py || echo "yidong.py failed"
 
       - name: Commit all generated reports and cache
         run: |
