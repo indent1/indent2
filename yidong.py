@@ -21,8 +21,8 @@ RED_DAYS_SHORT = 6
 
 TOP_N = 25
 
-# 首次建缓存时才会用到历史接口，并发别太高，避免被接口限流
-MAX_WORKERS = 3
+# 首次建缓存时才会用到新浪历史接口，别太高
+MAX_WORKERS = 6
 
 # 拉最近60个自然日，尽量覆盖10个交易日以及节假日空档
 HIST_CALENDAR_DAYS = 60
@@ -53,7 +53,11 @@ AI_CACHE_KEEP_DAYS = 180
 
 # ================= 工具函数 =================
 def cn_now():
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    """
+    返回北京时间，避免 datetime.utcnow() 的 DeprecationWarning。
+    保持 naive datetime，避免和旧缓存时间比较时报错。
+    """
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=8)
 
 
 def clean_stock_code(code):
@@ -186,71 +190,30 @@ def find_column(columns, keywords):
 
 
 # ================= 新浪/网易全市场实时行情 =================
-def normalize_spot_df(spot_df, source_name):
-    if spot_df is None or spot_df.empty:
-        return None
+def get_all_a_stock_spot_sina():
+    """
+    这一段按你提供的可运行代码写：
+    直接在函数内部完成字段识别、代码清洗、open/close 校验。
+    """
+    print("📈 正在通过【新浪/网易】获取A股全市场实时行情...")
 
-    try:
-        code_col = find_column(spot_df.columns, ["代码", "symbol", "code"])
-        name_col = find_column(spot_df.columns, ["名称", "name"])
-        close_col = find_column(spot_df.columns, ["最新价", "最新", "现价", "收盘", "price", "trade"])
-        open_col = find_column(spot_df.columns, ["今开", "开盘", "open"])
-
-        if not code_col or not name_col or not close_col:
-            print(f"❌ {source_name} 实时行情缺少关键字段。")
-            print(spot_df.columns.tolist())
-            return None
-
-        df = spot_df.copy()
-
-        df["code"] = df[code_col].apply(clean_stock_code)
-        df = df.dropna(subset=["code"]).copy()
-
-        df["symbol"] = df["code"].apply(get_market_prefix)
-        df["name"] = df[name_col].astype(str)
-        df["close"] = pd.to_numeric(df[close_col], errors="coerce")
-
-        if open_col:
-            df["open"] = pd.to_numeric(df[open_col], errors="coerce")
-        else:
-            df["open"] = None
-            print(f"⚠️ {source_name} 没有识别到今开字段，可能无法更新当天红K。")
-
-        df = df[df["code"].astype(str).str.match(r"^\d{6}$", na=False)].copy()
-        df = df[~df["name"].str.contains(r"\*?ST|退", regex=True, na=False)].copy()
-        df = df[df["close"] > 0].copy()
-
-        if open_col:
-            df = df[(df["open"].isna()) | (df["open"] > 0)].copy()
-
-        date_col = find_column(df.columns, ["日期", "date"])
-
-        if date_col:
-            df["date"] = df[date_col].apply(normalize_date)
-        else:
-            df["date"] = get_safe_market_date()
-
-        result = (
-            df[["symbol", "code", "name", "date", "open", "close"]]
-            .dropna(subset=["symbol", "code", "name", "date", "close"])
-            .drop_duplicates(subset=["symbol"], keep="last")
-            .copy()
+    def clean_code_for_spot(value):
+        text = str(value).lower()
+        text = (
+            text
+            .replace("sh", "")
+            .replace("sz", "")
+            .replace("bj", "")
+            .replace(".0", "")
+            .strip()
         )
 
-        if result.empty:
+        digits = "".join([ch for ch in text if ch.isdigit()])
+
+        if not digits:
             return None
 
-        print(f"🚀 {source_name} 返回可用股票数量：{len(result)}")
-        return result
-
-    except Exception as e:
-        print(f"❌ {source_name} 实时行情清洗失败：{str(e)}")
-        print(spot_df.columns.tolist())
-        return None
-
-
-def get_all_a_stock_spot_sina():
-    print("📈 正在通过【新浪/网易】获取A股全市场实时行情...")
+        return digits[-6:].zfill(6)
 
     providers = [
         ("新浪", lambda: ak.stock_zh_a_spot()),
@@ -262,15 +225,75 @@ def get_all_a_stock_spot_sina():
             try:
                 print(f"🔎 尝试获取 {source_name} 实时行情，第 {attempt + 1} 次...")
 
-                raw_df = fetcher()
-                result = normalize_spot_df(raw_df, source_name)
+                spot_df = fetcher()
 
-                if result is not None and not result.empty:
-                    print(f"✅ {source_name} 全市场行情获取成功！")
-                    return result
+                if spot_df is None or spot_df.empty:
+                    print(f"⚠️ {source_name} 返回为空。")
+                    time.sleep(2)
+                    continue
 
-                print(f"⚠️ {source_name} 返回为空或字段异常。")
-                time.sleep(2 + attempt * 2)
+                code_col = find_column(spot_df.columns, ["代码", "symbol", "code"])
+                name_col = find_column(spot_df.columns, ["名称", "name"])
+                close_col = find_column(
+                    spot_df.columns,
+                    ["最新价", "最新", "现价", "收盘", "trade", "price"]
+                )
+                open_col = find_column(
+                    spot_df.columns,
+                    ["今开", "开盘", "open"]
+                )
+
+                if not code_col or not name_col or not close_col or not open_col:
+                    print(f"❌ {source_name} 实时行情缺少红K所需字段。")
+                    print("当前字段：", spot_df.columns.tolist())
+                    time.sleep(2)
+                    continue
+
+                spot_df = spot_df.copy()
+
+                spot_df["code"] = spot_df[code_col].apply(clean_code_for_spot)
+                spot_df = spot_df.dropna(subset=["code"]).copy()
+
+                spot_df["symbol"] = spot_df["code"].apply(get_market_prefix)
+                spot_df["name"] = spot_df[name_col].astype(str)
+
+                spot_df["close"] = pd.to_numeric(spot_df[close_col], errors="coerce")
+                spot_df["open"] = pd.to_numeric(spot_df[open_col], errors="coerce")
+
+                spot_df = spot_df[
+                    spot_df["code"].astype(str).str.match(r"^\d{6}$", na=False)
+                ].copy()
+
+                spot_df = spot_df[
+                    ~spot_df["name"].str.contains(r"\*?ST|退", regex=True, na=False)
+                ].copy()
+
+                spot_df = spot_df.dropna(subset=["open", "close"]).copy()
+                spot_df = spot_df[(spot_df["open"] > 0) & (spot_df["close"] > 0)].copy()
+
+                date_col = find_column(spot_df.columns, ["日期", "date"])
+
+                if date_col:
+                    spot_df["date"] = spot_df[date_col].apply(normalize_date)
+                else:
+                    spot_df["date"] = get_safe_market_date()
+
+                result = (
+                    spot_df[["symbol", "code", "name", "date", "open", "close"]]
+                    .dropna(subset=["symbol", "code", "name", "date", "open", "close"])
+                    .drop_duplicates(subset=["symbol"], keep="last")
+                    .copy()
+                )
+
+                if result.empty:
+                    print(f"⚠️ {source_name} 清洗后无可用数据。")
+                    time.sleep(2)
+                    continue
+
+                print(f"✅ {source_name} 全市场行情获取成功！")
+                print(f"🚀 {source_name} 返回可用股票数量：{len(result)}")
+
+                return result
 
             except AttributeError as e:
                 print(f"⚠️ 当前 AkShare 版本可能没有 {source_name} 接口：{str(e)}")
@@ -278,7 +301,7 @@ def get_all_a_stock_spot_sina():
 
             except Exception as e:
                 print(f"⚠️ {source_name} 实时行情获取失败，第 {attempt + 1} 次：{str(e)}")
-                time.sleep(3 + attempt * 2)
+                time.sleep(3)
 
     print("❌ 新浪和网易实时行情均获取失败。")
     return None
@@ -480,7 +503,8 @@ def fetch_one_history_sina(row, start_date, end_date):
 
         return rows
 
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 历史K线获取失败：{row.get('name')}({row.get('code')})，原因：{str(e)}")
         return []
 
 
@@ -535,7 +559,7 @@ def update_cache_with_spot(cache_df, spot_df):
     spot_rows = spot_rows.dropna(subset=["open", "close"])
 
     if spot_rows.empty:
-        print("⚠️ 实时行情没有可用 open 字段，本次不更新当天K线。")
+        print("⚠️ 新浪/网易实时行情没有可用 open 字段，本次不更新当天K线。")
         return cache_df
 
     if cache_df is None or cache_df.empty:
@@ -554,7 +578,7 @@ def update_cache_with_spot(cache_df, spot_df):
     updated = updated.drop_duplicates(subset=["symbol", "date"], keep="last")
     updated = updated.sort_values(["symbol", "date"])
 
-    print(f"✅ 已用实时行情更新OHLC缓存，当前缓存 {len(updated)} 行。")
+    print(f"✅ 已用新浪/网易实时行情更新OHLC缓存，当前缓存 {len(updated)} 行。")
     return updated
 
 
@@ -867,7 +891,7 @@ draft: false
 
 可能原因包括：
 
-- 新浪或网易接口临时不可用
+- 新浪/网易接口临时不可用
 - GitHub Actions 海外网络异常
 - AkShare 接口字段变化
 - 请求频率过高被临时限制
