@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 LOOKBACK_TRADING_DAYS = 12          # 最近12个交易日
 SURGE_THRESHOLD = 7.0               # 单日涨幅大于7%
 MIN_SURGE_TIMES = 3                 # 至少出现3次
-TOP_N = 10                          # 最终给AI分析前10名
+TOP_N = 30                         # 最终给AI分析前10名
 
 # 全市场逐只拉历史K线，别开太高，海外IP建议 3~6
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "6"))
