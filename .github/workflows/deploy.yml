@@ -108,6 +108,9 @@ jobs:
           #echo "4. Running yidong.py..."
           #python yidong.py || echo "yidong.py failed"
 
+          echo "4. Running duotouxushi.py..."
+          python duotouxushi.py || echo "duotouxushi.py failed"
+
       - name: Commit all generated reports and cache
         run: |
           # 1. 备份生成的所有新文件
