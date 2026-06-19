@@ -111,6 +111,9 @@ jobs:
           echo "4. Running duotouxushi.py..."
           python duotouxushi.py || echo "duotouxushi.py failed"
 
+          echo "5. Running geminibzq.py..."
+          python geminibzq.py || echo "geminibzq.py failed"
+
       - name: Commit all generated reports and cache
         run: |
           # 1. 备份生成的所有新文件
