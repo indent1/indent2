@@ -114,6 +114,9 @@ jobs:
           echo "5. Running geminibzq.py..."
           python geminibzq.py || echo "geminibzq.py failed"
 
+          echo "6. Running secondgj.py..."
+          python secondgj.py || echo "secondgj.py failed"
+
       - name: Commit all generated reports and cache
         run: |
           # 1. 备份生成的所有新文件
