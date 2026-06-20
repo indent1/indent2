@@ -1,4 +1,5 @@
-baseurl = "https://indent1.github.io/indent2/"
+#baseurl = "https://indent1.github.io/indent2/"
+baseurl = "https://indent2.vercel.app/"
 languageCode = "zh-cn"
 title = "我的第二赛博基地"
 defaultContentLanguage = "zh-cn"
