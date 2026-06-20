@@ -120,6 +120,9 @@ jobs:
           echo "7. Running duotouxs2.py..."
           python duotouxs2.py || echo "duotouxs2.py failed"
 
+          echo "8. Running hongkclaude.py..."
+          python hongkclaude.py || echo "hongkclaude.py failed"
+
       - name: Commit all generated reports and cache
         run: |
           # 1. 备份生成的所有新文件
