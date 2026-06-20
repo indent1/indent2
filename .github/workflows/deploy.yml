@@ -117,6 +117,9 @@ jobs:
           echo "6. Running secondgj.py..."
           python secondgj.py || echo "secondgj.py failed"
 
+          echo "7. Running duotouxs2.py..."
+          python duotouxs2.py || echo "duotouxs2.py failed"
+
       - name: Commit all generated reports and cache
         run: |
           # 1. 备份生成的所有新文件
