@@ -293,17 +293,17 @@ def normalize_stock_list_df(spot_df, source_name):
         return None
 
 
-# ================= 核心1-1：按A代码接口获取全市场股票名单 =================
-def get_all_a_stock_list_sina():
+# ================= 核心1-1：获取全市场股票名单 (东方财富优先，新浪兜底) =================
+def get_all_a_stock_list():
     """
-    全市场名单使用新浪 ak.stock_zh_a_spot()；
-    网易 ak.stock_zh_a_spot_netease() 作为兜底。
+    全市场名单使用最稳定的东方财富 ak.stock_zh_a_spot_em() 作为主力；
+    如果失败，则使用新浪 ak.stock_zh_a_spot() 作为兜底。
     """
-    print("📈 正在获取A股全市场最新名单：新浪优先，网易兜底...")
+    print("📈 正在获取A股全市场最新名单：东方财富优先，新浪兜底...")
 
     providers = [
+        ("东方财富", lambda: ak.stock_zh_a_spot_em()),
         ("新浪", lambda: ak.stock_zh_a_spot()),
-        ("网易", lambda: ak.stock_zh_a_spot_netease()),
     ]
 
     for source_name, fetcher in providers:
@@ -329,7 +329,7 @@ def get_all_a_stock_list_sina():
                 print(f"⚠️ {source_name} 全市场名单获取失败，第 {attempt + 1} 次：{str(e)}")
                 time.sleep(3 + attempt * 2)
 
-    print("❌ 新浪和网易全市场名单均获取失败。")
+    print("❌ 东方财富和新浪全市场名单均获取失败。")
     return None
 
 
@@ -708,7 +708,8 @@ def get_pattern_surge_stocks_all_market():
 
     prune_hist_cache()
 
-    stock_info = get_all_a_stock_list_sina()
+    # 调用修改后的接口获取股票名单
+    stock_info = get_all_a_stock_list()
 
     if stock_info is None:
         return "ERROR"
@@ -1048,15 +1049,15 @@ categories:
 tags:
     - AI选股
     - 全市场扫描
-    - 新浪行情
-    - 网易兜底
+    - 东方财富接口
+    - 新浪兜底
     - DeepSeek
 draft: false
 ---
 
 # 🚀 全市场雷达：12日内3次暴涨异动股扫描
 
-本报告由 **Python + 新浪/网易行情数据 + DeepSeek AI + 本地AI缓存** 自动生成。
+本报告由 **Python + 东方财富/新浪行情数据 + DeepSeek AI + 本地AI缓存** 自动生成。
 
 > ⚠️ 风险提示：本文仅为基于公开行情数据的自动化整理与AI文本生成，不构成任何投资建议。股市有风险，交易需谨慎。
 
@@ -1066,7 +1067,7 @@ draft: false
 - 时间窗口：最近 **{LOOKBACK_TRADING_DAYS}** 个交易日
 - 异动标准：至少 **{MIN_SURGE_TIMES}** 次单日涨幅大于 **{SURGE_THRESHOLD}%**
 - 排名方式：按最近区间总涨幅排序，截取 TOP {TOP_N}
-- 数据来源：名单接口使用新浪行情接口为主、网易行情接口兜底；历史K线使用新浪历史K线接口
+- 数据来源：名单接口使用东方财富行情接口为主、新浪接口兜底；历史K线使用新浪接口
 - AI模型：{DEEPSEEK_MODEL}
 - 缓存机制：历史K线、扫描结果、AI个股解读均启用本地缓存
 
@@ -1097,11 +1098,11 @@ draft: false
         md_content += f"""
 ## 今日扫描结果
 
-今日新浪/网易数据抓取失败，未能完成全市场扫描。
+今日东方财富/新浪数据抓取失败，未能完成全市场扫描。
 
 可能原因包括：
 
-- 新浪/网易接口临时不可用
+- 东方财富/新浪接口临时不可用
 - GitHub Actions 海外网络访问异常
 - AkShare 接口返回字段变化
 - 请求频率过高被临时限制
